@@ -1,0 +1,912 @@
+/* Modern theme for ppixiv.  Every rule is scoped to html.ppx-zh, which the script only sets
+ * while ppixiv is running, so Pixiv's own pages are never restyled. */
+
+html.ppx-zh {
+    --pz-bg: #0c0d10;
+    --pz-surface: rgba(22, 23, 28, 0.78);
+    --pz-surface-strong: rgba(20, 21, 26, 0.92);
+    --pz-surface-solid: #16171c;
+    --pz-raise: rgba(255, 255, 255, 0.055);
+    --pz-raise-hover: rgba(255, 255, 255, 0.1);
+    --pz-raise-active: rgba(255, 255, 255, 0.14);
+    --pz-border: rgba(255, 255, 255, 0.08);
+    --pz-border-strong: rgba(255, 255, 255, 0.14);
+    --pz-text: #eceef2;
+    --pz-text-2: #a6aab4;
+    --pz-text-3: #6d717c;
+    --pz-accent: #3a9dff;
+    --pz-accent-hover: #5cb0ff;
+    --pz-accent-soft: rgba(58, 157, 255, 0.18);
+    --pz-accent-ring: rgba(58, 157, 255, 0.45);
+    --pz-heart: #ff4060;
+    --pz-radius: 16px;
+    --pz-radius-md: 12px;
+    --pz-radius-sm: 9px;
+    --pz-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.7), 0 4px 14px rgba(0, 0, 0, 0.35);
+    --pz-shadow-sm: 0 6px 18px -6px rgba(0, 0, 0, 0.6);
+    --pz-blur: blur(22px) saturate(150%);
+    --pz-text-strong: #fff;
+    --pz-selected-text: #d8ebff;
+    --pz-tag-text: #cfe3ff;
+    --pz-scroll-thumb: rgba(255, 255, 255, 0.14);
+    --pz-scroll-thumb-hover: rgba(255, 255, 255, 0.3);
+    --pz-tip-bg: rgba(14, 15, 19, 0.94);
+    --pz-toast-bg: rgba(18, 19, 24, 0.9);
+    --pz-input-bg: rgba(255, 255, 255, 0.04);
+    --pz-input-bg-focus: rgba(255, 255, 255, 0.06);
+    --pz-thumb-placeholder: #15161a;
+    --pz-desc-bg: rgba(255, 255, 255, 0.04);
+    --pz-desc-text: #c9ccd3;
+    --pz-dialog-bg: rgba(18, 19, 24, 0.96);
+    --pz-switch-off: rgba(255, 255, 255, 0.16);
+    --pz-menu-bg: #17181d;
+    --pz-menu-shadow: rgba(0, 0, 0, 0.55);
+    --pz-menu-button: rgba(255, 255, 255, 0.06);
+    --pz-menu-button-text: #a9adb6;
+    --pz-menu-button-disabled: rgba(255, 255, 255, 0.03);
+    --pz-menu-button-disabled-text: #4f525a;
+    --pz-menu-button-hover: rgba(255, 255, 255, 0.16);
+    --pz-warning-bg: rgba(255, 196, 0, 0.08);
+    --pz-warning-border: rgba(255, 196, 0, 0.25);
+    --pz-warning-text: #f3dc9a;
+    --pz-icon: #9a9ea8;
+    --pz-icon-disabled: #4a4d55;
+    --pz-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+    --pz-font: "Inter", "MiSans", "HarmonyOS Sans SC", "PingFang SC", "Noto Sans CJK SC",
+        "Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+
+    /* ppixiv's own variables */
+    --main-background-color: var(--pz-bg);
+    --background-noise: none;
+    --button-color: var(--pz-icon);
+    --button-highlight-color: var(--pz-text-strong);
+    --button-disabled-color: var(--pz-icon-disabled);
+    --input-outline: var(--pz-border-strong);
+    --input-outline-focused: var(--pz-accent);
+    --ui-bg-color: var(--pz-surface);
+    --ui-fg-color: var(--pz-text);
+    --ui-border-color: var(--pz-border);
+    --ui-bg-section-color: var(--pz-desc-bg);
+    --frame-bg-color: var(--pz-surface-strong);
+    --frame-fg-color: var(--pz-text);
+    --frame-border-color: var(--pz-border);
+    --dropdown-menu-hover-color: var(--pz-raise-hover);
+    --box-link-fg-color: var(--pz-text);
+    --box-link-bg-color: var(--pz-raise);
+    --box-link-disabled-color: var(--pz-text-3);
+    --box-link-hover-color: var(--pz-raise-hover);
+    --box-link-selected-color: var(--pz-accent-soft);
+    --box-link-selected-hover-color: var(--pz-accent-soft);
+    --minor-text-fg-color: var(--pz-text-2);
+    --title-fg-color: var(--pz-text);
+    --title-bg-color: transparent;
+    --like-button-color: var(--pz-icon);
+    --like-button-liked-color: #f5b700;
+    --like-button-hover-color: var(--pz-text-strong);
+}
+
+html.ppx-zh body,
+html.ppx-zh .title-font,
+html.ppx-zh .widget input,
+html.ppx-zh .widget textarea,
+html.ppx-zh .widget button {
+    font-family: var(--pz-font);
+}
+
+html.ppx-zh body {
+    color: var(--pz-text);
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: 0.01em;
+}
+
+html.ppx-zh ::selection {
+    background: var(--pz-accent-soft);
+}
+
+/* ------------------------------------------------------------------ scrollbars */
+
+html.ppx-zh:not(.macos) ::-webkit-scrollbar,
+html.ppx-zh:not(.macos) .search-results::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background-color: transparent;
+}
+
+html.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb {
+    background-color: var(--pz-scroll-thumb);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+}
+
+html.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--pz-scroll-thumb-hover);
+}
+
+html.ppx-zh:not(.macos) ::-webkit-scrollbar-corner,
+html.ppx-zh:not(.macos) ::-webkit-resizer {
+    background: transparent;
+}
+
+/* ------------------------------------------------------------------ tooltips */
+
+@keyframes pz-tip-in {
+    from { opacity: 0; translate: 0 3px; }
+    to { opacity: 1; translate: 0 0; }
+}
+
+@media (hover: hover) {
+    html.ppx-zh .popup:hover::after {
+        background: var(--pz-tip-bg);
+        color: var(--pz-text);
+        border: 1px solid var(--pz-border-strong);
+        border-radius: 8px;
+        padding: 5px 10px;
+        font-size: 12.5px;
+        font-weight: 500;
+        line-height: 1.4;
+        letter-spacing: 0.02em;
+        text-shadow: none;
+        box-shadow: var(--pz-shadow-sm);
+        top: -2.4em;
+        animation: pz-tip-in 0.14s var(--pz-ease) both;
+    }
+
+    html.ppx-zh .popup.popup-bottom:hover::after {
+        top: auto;
+        bottom: -2.5em;
+    }
+}
+
+/* ------------------------------------------------------------------ icon buttons */
+
+html.ppx-zh .icon-button {
+    position: relative;
+    isolation: isolate;
+    transition: color 0.15s var(--pz-ease);
+}
+
+html.ppx-zh .icon-button::before {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    z-index: -1;
+    border-radius: 10px;
+    background: transparent;
+    transition: background-color 0.15s var(--pz-ease), transform 0.15s var(--pz-ease);
+    transform: scale(0.85);
+}
+
+@media (hover: hover) {
+    html.ppx-zh .icon-button:hover::before,
+    html.ppx-zh .popup-visible > .icon-button::before {
+        background: var(--pz-raise-hover);
+        transform: scale(1);
+    }
+}
+
+html.ppx-zh .icon-button.highlighted::before {
+    background: var(--pz-accent-soft);
+    transform: scale(1);
+}
+
+html.ppx-zh .button-row {
+    gap: calc(var(--icon-row-gap) + 6px);
+}
+
+/* The settings button turns yellow when ppixiv has a changelog entry.  Use a dot instead. */
+html.ppx-zh[data-whats-new-updated] .screen-search-container .thumbnail-ui-box .settings-menu-box {
+    --button-color: var(--pz-icon);
+}
+
+html.ppx-zh[data-whats-new-updated] .settings-menu-box .icon-button::after {
+    content: "";
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--pz-accent);
+    box-shadow: 0 0 0 2px var(--pz-bg);
+}
+
+/* ------------------------------------------------------------------ box links (pills) */
+
+html.ppx-zh .box-link {
+    border-radius: var(--pz-radius-sm);
+    transition: background-color 0.15s var(--pz-ease), color 0.15s var(--pz-ease), box-shadow 0.15s var(--pz-ease);
+    font-weight: 500;
+}
+
+html.ppx-zh .box-link.selected {
+    color: var(--pz-selected-text);
+    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);
+}
+
+html.ppx-zh .menu-dropdown-button.selected,
+html.ppx-zh .menu-dropdown-button {
+    box-shadow: none;
+}
+
+html.ppx-zh .box-link.disabled {
+    opacity: 0.55;
+}
+
+html.ppx-zh .box-button-row > .box-link {
+    margin: 0 0.18em;
+}
+
+html.ppx-zh .box-link .icon.with-text {
+    opacity: 0.8;
+}
+
+/* ------------------------------------------------------------------ inputs */
+
+html.ppx-zh .input-field-container {
+    outline: none;
+    border: 1px solid var(--pz-border-strong);
+    background: var(--pz-input-bg);
+    border-radius: var(--pz-radius-sm);
+    transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+}
+
+html.ppx-zh .input-field-container:focus-within {
+    outline: none;
+    border-color: var(--pz-accent);
+    background: var(--pz-input-bg-focus);
+    box-shadow: 0 0 0 3px var(--pz-accent-soft);
+}
+
+html.ppx-zh .input-field-container > input {
+    background: transparent;
+    color: var(--pz-text);
+    border: none;
+}
+
+html.ppx-zh .input-field-container > input::placeholder {
+    color: var(--pz-text-3);
+}
+
+/* ------------------------------------------------------------------ dropdowns and menus */
+
+html.ppx-zh .dropdown-box {
+    background: var(--pz-surface-strong);
+    -webkit-backdrop-filter: var(--pz-blur);
+    backdrop-filter: var(--pz-blur);
+    border: 1px solid var(--pz-border-strong);
+    border-radius: var(--pz-radius-md);
+    box-shadow: var(--pz-shadow);
+}
+
+html.ppx-zh .popup-menu-box {
+    padding: 6px;
+}
+
+html.ppx-zh .vertical-list > .box-link {
+    height: 2.15em;
+    border-radius: 8px;
+}
+
+html.ppx-zh .vertical-list .box-link-row {
+    gap: 0.25em;
+}
+
+html.ppx-zh .vertical-list .box-link-row > .box-link {
+    border-radius: 8px;
+}
+
+html.ppx-zh .follow-widget .separator {
+    height: 1px;
+    margin: 4px 6px;
+    background-color: var(--pz-border-strong);
+}
+
+/* ------------------------------------------------------------------ search page header */
+
+html.ppx-zh .screen-search-container .thumbnail-ui-box {
+    background: var(--pz-surface);
+    -webkit-backdrop-filter: var(--pz-blur);
+    backdrop-filter: var(--pz-blur);
+    border: 1px solid var(--pz-border);
+    border-radius: 20px;
+    box-shadow: var(--pz-shadow);
+    padding: 14px 20px 14px;
+}
+
+html.ppx-zh .screen-search-container .search-desktop-ui {
+    padding-top: calc(max(14px, env(safe-area-inset-top)));
+    padding-bottom: 14px;
+}
+
+html.ppx-zh .screen-search-container .search-title {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+html.ppx-zh .screen-search-container .thumbnail-ui-box .button-row {
+    margin-top: 4px;
+}
+
+html.ppx-zh .screen-search-container .thumbnail-ui-box .data-source-ui {
+    padding-top: 2px;
+}
+
+/* The discovery type filter sits on the same line as the age buttons. */
+html.ppx-zh .screen-search-container .data-source-ui > div:has(> .pz-discovery-type) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5em 1.2em;
+}
+
+html.ppx-zh .title-with-button-row-container:hover .title-with-button-row {
+    background: transparent;
+}
+
+html.ppx-zh .avatar-widget .avatar,
+html.ppx-zh .screen-search-container .image-for-suggestions > img {
+    border-radius: 14px;
+}
+
+/* ------------------------------------------------------------------ thumbnails */
+
+html.ppx-zh .search-view .thumbnail-box a.thumbnail-link {
+    border-radius: 12px;
+    background: var(--pz-thumb-placeholder);
+    transition: box-shadow 0.2s var(--pz-ease), transform 0.2s var(--pz-ease);
+}
+
+html.ppx-zh:not(.mobile) .search-view .thumbnail-box a.thumbnail-link {
+    border-radius: 12px;
+}
+
+/* Hover ring.  Drawn inside the thumbnail, since rows use contain: strict and clip anything
+ * outside them. */
+html.ppx-zh .search-view .thumbnail-box a.thumbnail-link {
+    position: relative;
+}
+
+html.ppx-zh .search-view .thumbnail-box a.thumbnail-link::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.9), inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    transition: opacity 0.15s var(--pz-ease);
+}
+
+@media (hover: hover) {
+    html.ppx-zh .search-view .thumbnail-box:hover a.thumbnail-link::after {
+        opacity: 1;
+    }
+}
+
+html.ppx-zh .search-view .thumbnail-box .bottom-row {
+    bottom: 6px;
+    padding: 0 6px;
+}
+
+html.ppx-zh .search-view .thumbnail-box .bottom-row .thumbnail-label,
+html.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {
+    background: rgba(12, 13, 16, 0.62);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+html.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {
+    padding: 0.2em 0.6em;
+}
+
+html.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box:hover {
+    background: var(--pz-accent);
+    border-color: transparent;
+}
+
+html.ppx-zh .search-view .thumbnail-box.expanded-thumb a.thumbnail-link {
+    border-bottom-color: var(--pz-accent);
+    border-bottom-width: 4px;
+}
+
+html.ppx-zh .search-view .thumbnail-box.muted .muted-text .muted-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--pz-text-2);
+}
+
+html.ppx-zh .search-view > .no-results > .message {
+    background: var(--pz-surface);
+    border: 1px solid var(--pz-border);
+    border-radius: var(--pz-radius-md);
+    padding: 0.6em 1.2em;
+    color: var(--pz-text-2);
+}
+
+/* ------------------------------------------------------------------ toast messages */
+
+html.ppx-zh .hover-message > .message {
+    background: var(--pz-toast-bg);
+    -webkit-backdrop-filter: var(--pz-blur);
+    backdrop-filter: var(--pz-blur);
+    border: 1px solid var(--pz-border-strong);
+    border-radius: 14px;
+    box-shadow: var(--pz-shadow);
+    padding: 0.55em 1.1em;
+    font-size: 15px;
+    font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ image info panel */
+
+html.ppx-zh .image-ui .ui-box {
+    background: var(--pz-surface);
+    -webkit-backdrop-filter: var(--pz-blur);
+    backdrop-filter: var(--pz-blur);
+    border: 1px solid var(--pz-border);
+    border-radius: 18px;
+    box-shadow: var(--pz-shadow);
+    padding: 14px 16px 16px;
+    top: 14px;
+    left: 14px;
+    min-width: min(500px, 90vw);
+    max-height: min(560px, 100vh - 28px);
+}
+
+html.ppx-zh .image-ui .ui-box .avatar-popup {
+    top: 14px;
+    right: 14px;
+    width: 3.6em;
+}
+
+html.ppx-zh .image-ui .ui-box .title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0;
+    margin: 0 0 8px;
+    border-radius: 0;
+    line-height: 1.35;
+}
+
+/* Put the author on its own muted line instead of "title by author". */
+html.ppx-zh .image-ui .ui-box .title-block .author-block > span:first-child {
+    display: none;
+}
+
+html.ppx-zh .image-ui .ui-box .title-block .author {
+    vertical-align: baseline;
+}
+
+/* Keep the icon row clear of the avatar in the top right. */
+html.ppx-zh .image-ui .ui-box > .button-row {
+    padding-right: 4.2em;
+    gap: calc(var(--icon-row-gap) + 2px);
+}
+
+html.ppx-zh .image-ui .ui-box .title-block .title {
+    font-size: 19px;
+    font-weight: 700;
+}
+
+html.ppx-zh .image-ui .ui-box .title-block .author {
+    color: var(--pz-text-2);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+html.ppx-zh .image-ui .ui-box .post-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 2px 0 8px;
+}
+
+html.ppx-zh .image-ui .ui-box .post-info > * {
+    background: var(--pz-raise);
+    color: var(--pz-text-2);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+html.ppx-zh .image-ui .ui-box .post-info > [hidden] {
+    display: none !important;
+}
+
+html.ppx-zh .image-ui .ui-box .box-link.tag {
+    height: 1.9em;
+    font-size: 14px;
+    border-radius: 999px;
+    padding: 0 0.8em;
+    margin: 0 4px 6px 0;
+    background: var(--pz-raise);
+    color: var(--pz-tag-text);
+}
+
+html.ppx-zh .image-ui .ui-box .box-link.tag:hover {
+    background: var(--pz-accent-soft);
+}
+
+html.ppx-zh .image-ui .ui-box .description {
+    margin-top: 6px;
+    padding: 10px 12px;
+    border-radius: var(--pz-radius-md);
+    background: var(--pz-desc-bg);
+    color: var(--pz-desc-text);
+    line-height: 1.65;
+    font-size: 14px;
+}
+
+html.ppx-zh .image-ui .ui-box .description * {
+    color: inherit;
+}
+
+html.ppx-zh .image-ui .ui-box .description a {
+    color: var(--pz-accent-hover);
+}
+
+/* ------------------------------------------------------------------ context menu (hold right click) */
+
+html.ppx-zh .popup-context-menu {
+    --context-menu-bg-color: var(--pz-menu-bg);
+    color: var(--pz-text);
+    filter: drop-shadow(0 16px 32px var(--pz-menu-shadow));
+}
+
+html.ppx-zh .popup-context-menu .button-strip > .button-block:first-child {
+    border-radius: 16px 0 0 16px;
+}
+
+html.ppx-zh .popup-context-menu .button-strip > .button-block:last-child {
+    border-radius: 0 16px 16px 0;
+}
+
+html.ppx-zh .popup-context-menu .button-strip > .button-block:only-child {
+    border-radius: 16px;
+}
+
+html.ppx-zh .popup-context-menu .button-strip .button {
+    background-color: var(--pz-menu-button);
+    color: var(--pz-menu-button-text);
+    border-radius: 11px;
+    transition: background-color 0.12s var(--pz-ease), color 0.12s var(--pz-ease);
+}
+
+html.ppx-zh .popup-context-menu .button-strip .button:not(.enabled) {
+    color: var(--pz-menu-button-disabled-text);
+    background-color: var(--pz-menu-button-disabled);
+}
+
+@media (hover: hover) {
+    html.ppx-zh .popup-context-menu .button-strip .button.enabled:hover {
+        background-color: var(--pz-menu-button-hover);
+        color: var(--pz-text-strong);
+    }
+}
+
+/* The like button is replaced with "similar works", which works whether or not the image was
+ * liked.  ppixiv drops .enabled and adds .liked after a like, so style it the same either way. */
+html.ppx-zh .popup-context-menu .button-strip .button.pz-similar {
+    color: var(--pz-menu-button-text);
+    background-color: var(--pz-menu-button);
+}
+
+html.ppx-zh .popup-context-menu .button.button-like.pz-similar > svg {
+    color: inherit;
+    margin-top: 0;
+}
+
+@media (hover: hover) {
+    html.ppx-zh .popup-context-menu .button-strip .button.pz-similar:hover {
+        background-color: var(--pz-menu-button-hover);
+        color: var(--pz-text-strong);
+    }
+}
+
+html.ppx-zh .popup-context-menu .button-strip .button.enabled.selected {
+    background-color: var(--pz-accent-soft);
+    color: var(--pz-selected-text);
+    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);
+}
+
+html.ppx-zh .popup-context-menu .button-strip .button .tag-dropdown-arrow {
+    border-top-color: var(--pz-menu-button);
+}
+
+html.ppx-zh .popup-context-menu .avatar-widget .avatar {
+    border-radius: 11px;
+}
+
+html.ppx-zh .popup-context-menu .context-menu-image-info {
+    color: var(--pz-text-2);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+html.ppx-zh .popup-context-menu .tooltip-display .tooltip-display-text {
+    background: var(--pz-tip-bg);
+    border: 1px solid var(--pz-border-strong);
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-size: 13.5px;
+    font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ dialogs */
+
+html.ppx-zh .dialog {
+    border: 1px solid var(--pz-border);
+    box-shadow: var(--pz-shadow);
+}
+
+html.ppx-zh :has(> .dialog).floating > .dialog {
+    background: var(--pz-dialog-bg);
+    border-radius: 20px;
+}
+
+html.ppx-zh :has(> .dialog).floating {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+html.ppx-zh .dialog .header {
+    padding-bottom: 6px;
+}
+
+html.ppx-zh .dialog .header .header-text {
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+html.ppx-zh .dialog .header .close-button-container .close-button {
+    border-radius: 10px;
+    transition: background-color 0.15s;
+}
+
+html.ppx-zh .dialog .header .close-button-container .close-button:hover {
+    background: var(--pz-raise-hover);
+}
+
+/* Settings: sidebar */
+html.ppx-zh .settings-dialog > .dialog > .scroll {
+    gap: 1.5em;
+}
+
+html.ppx-zh .settings-dialog .sections {
+    gap: 2px;
+    padding-right: 1.2em;
+    border-right: 1px solid var(--pz-border);
+}
+
+html.ppx-zh .settings-dialog .sections > .box-link {
+    padding: 0.45em 0.8em;
+    height: auto;
+    border-radius: 10px;
+    font-size: 0.95em;
+    box-shadow: none;
+}
+
+html.ppx-zh .settings-dialog .sections > .box-link:not(.selected) {
+    opacity: 1;
+    color: var(--pz-text-2);
+}
+
+html.ppx-zh .settings-dialog .sections > .box-link.selected {
+    background: var(--pz-raise-active);
+    color: var(--pz-text-strong);
+    box-shadow: none;
+}
+
+html.ppx-zh[data-whats-new-updated] .settings-dialog .sections .settings-page-button[data-page='whatsNew'] {
+    color: var(--pz-accent-hover);
+}
+
+/* Settings: rows */
+html.ppx-zh .settings-list {
+    gap: 2px;
+}
+
+html.ppx-zh .settings-list > .box-link {
+    padding: 0.6em 0.8em;
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+html.ppx-zh .settings-list > .box-link.clickable:hover,
+html.ppx-zh .settings-list > .box-link:has(.checkbox):hover {
+    background: var(--pz-raise);
+}
+
+html.ppx-zh .settings-list > .box-link > .explanation {
+    color: var(--pz-text-3);
+    font-size: 78%;
+    margin-top: 2px;
+    font-weight: 400;
+}
+
+/* Checkboxes become switches.  The script mirrors the icon state into data-pz-on. */
+html.ppx-zh .font-icon.checkbox {
+    font-size: 0 !important;
+    color: transparent !important;
+    flex: none;
+    position: relative;
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--pz-switch-off);
+    transition: background-color 0.18s var(--pz-ease);
+    align-self: center;
+}
+
+html.ppx-zh .font-icon.checkbox::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    transition: transform 0.18s var(--pz-ease);
+}
+
+html.ppx-zh .font-icon.checkbox[data-pz-on="1"] {
+    background: var(--pz-accent);
+}
+
+html.ppx-zh .font-icon.checkbox[data-pz-on="1"]::after {
+    transform: translateX(16px);
+}
+
+/* Sliders */
+html.ppx-zh .slider {
+    --track-height: 6px;
+    --thumb-height: 18px;
+    --on-color: var(--pz-accent);
+    --off-color: var(--pz-switch-off);
+}
+
+html.ppx-zh .slider:hover {
+    --on-color: var(--pz-accent-hover);
+}
+
+html.ppx-zh .slider .track-left {
+    border-radius: 999px 0 0 999px;
+}
+
+html.ppx-zh .slider .track-right {
+    border-radius: 0 999px 999px 0;
+}
+
+html.ppx-zh .slider .thumb {
+    background: #fff;
+    box-shadow: 0 0 0 4px var(--pz-accent-soft), 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+/* Mutes */
+html.ppx-zh .muted-tags-popup .mute-warning {
+    background: var(--pz-warning-bg);
+    border: 1px solid var(--pz-warning-border);
+    color: var(--pz-warning-text);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-size: 0.85em;
+    line-height: 1.6;
+}
+
+/* ------------------------------------------------------------------ video controls */
+
+html.ppx-zh .video-ui > .video-ui-strip {
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0));
+}
+
+html.ppx-zh .seek-bar > .seek-parts > [data-seek-part="fill"] {
+    background-color: var(--pz-accent);
+}
+
+html.ppx-zh .seek-bar > .seek-parts > [data-seek-part="loaded"] {
+    background-color: rgba(255, 255, 255, 0.35);
+}
+
+/* ------------------------------------------------------------------ light mode */
+
+/* The script adds pz-light to <html> when light mode is chosen, or when "follow system" is
+ * chosen and the system is light. */
+html.ppx-zh.pz-light {
+    color-scheme: light;
+
+    --pz-bg: #f3f4f7;
+    --pz-bg-rgb: 243 244 247;
+    --pz-surface: rgba(255, 255, 255, 0.8);
+    --pz-surface-strong: rgba(255, 255, 255, 0.95);
+    --pz-surface-solid: #fff;
+    --pz-raise: rgba(20, 24, 34, 0.05);
+    --pz-raise-hover: rgba(20, 24, 34, 0.085);
+    --pz-raise-active: rgba(20, 24, 34, 0.11);
+    --pz-border: rgba(20, 24, 34, 0.09);
+    --pz-border-strong: rgba(20, 24, 34, 0.14);
+    --pz-text: #1c1e24;
+    --pz-text-2: #5c616c;
+    --pz-text-3: #8e939e;
+    --pz-text-strong: #0b0c0f;
+    --pz-accent: #0a84f0;
+    --pz-accent-hover: #0070d6;
+    --pz-accent-soft: rgba(10, 132, 240, 0.12);
+    --pz-accent-ring: rgba(10, 132, 240, 0.45);
+    --pz-selected-text: #005bb5;
+    --pz-tag-text: #0b62c4;
+    --pz-shadow: 0 18px 44px -14px rgba(20, 28, 45, 0.25), 0 3px 10px rgba(20, 28, 45, 0.08);
+    --pz-shadow-sm: 0 6px 16px -6px rgba(20, 28, 45, 0.22);
+    --pz-scroll-thumb: rgba(20, 24, 34, 0.18);
+    --pz-scroll-thumb-hover: rgba(20, 24, 34, 0.35);
+    --pz-tip-bg: rgba(255, 255, 255, 0.97);
+    --pz-toast-bg: rgba(255, 255, 255, 0.95);
+    --pz-input-bg: rgba(255, 255, 255, 0.75);
+    --pz-input-bg-focus: #fff;
+    --pz-thumb-placeholder: #e4e6ea;
+    --pz-desc-bg: rgba(20, 24, 34, 0.04);
+    --pz-desc-text: #3b3f48;
+    --pz-dialog-bg: rgba(255, 255, 255, 0.97);
+    --pz-switch-off: rgba(20, 24, 34, 0.18);
+    --pz-menu-bg: #fff;
+    --pz-menu-shadow: rgba(20, 28, 45, 0.24);
+    --pz-menu-button: rgba(20, 24, 34, 0.05);
+    --pz-menu-button-text: #4d525c;
+    --pz-menu-button-disabled: rgba(20, 24, 34, 0.025);
+    --pz-menu-button-disabled-text: #b9bdc5;
+    --pz-menu-button-hover: rgba(20, 24, 34, 0.1);
+    --pz-warning-bg: rgba(240, 170, 0, 0.1);
+    --pz-warning-border: rgba(200, 140, 0, 0.3);
+    --pz-warning-text: #7a5600;
+    --pz-icon: #6a6f7a;
+    --pz-icon-disabled: #c4c7cd;
+    --like-button-liked-color: #e0a100;
+
+    /* ppixiv sets an inline black background on <html> while it starts up. */
+    background-color: var(--pz-bg) !important;
+}
+
+/* Dim the page behind dialogs less. */
+html.ppx-zh.pz-light :has(> .dialog).floating {
+    background-color: rgba(20, 24, 34, calc(var(--dialog-visible, 1) * 0.28));
+}
+
+html.ppx-zh.pz-light .search-title .word.or,
+html.ppx-zh.pz-light .input-dropdown .search .word.or {
+    color: var(--pz-text-3);
+}
+
+html.ppx-zh.pz-light .years-ago > a {
+    background-color: var(--pz-raise);
+}
+
+/* ppixiv fades the search results behind the image view to black.  Keep its opacity formula,
+ * which makes the layer fully transparent while the image view is hidden, and only change the
+ * color. */
+html.ppx-zh.pz-light .screen-illust-container .fade-search {
+    background-color: rgb(var(--pz-bg-rgb) / calc(1 - (var(--illust-hidden) - 0.1) / 0.9));
+}
+
+/* Bookmark and like counts are outlined so they read over icons.  Use a light outline. */
+html.ppx-zh.pz-light {
+    --minor-text-shadow-color: rgba(255, 255, 255, 0.95);
+}
+
+/* ------------------------------------------------------------------ appearance button */
+
+html.ppx-zh .pz-theme-button svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
