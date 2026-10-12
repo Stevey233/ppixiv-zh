@@ -1,10 +1,10 @@
 // Runs ppixiv's real TagTranslations class with the script's wrappers.  Pass the path to
 // ppixiv's web/vview/misc/tag-translations.js if it isn't in ~/scratch/ppixiv-src.
 import fs from 'node:fs';
-const main = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+const main = fs.readFileSync(process.argv[3] ?? new URL('../src/main.js', import.meta.url), 'utf8');
 const ttSrc = fs.readFileSync(process.argv[2] ?? process.env.HOME + '/scratch/ppixiv-src/repo/web/vview/misc/tag-translations.js', 'utf8').replace(/^import .*$/mg, '').replace('export default class', 'class');
 class KeyStorage { constructor() { this.m = new Map(); }
-  async multiGet(keys) { return keys.map(k => this.m.get(k)); }
+  async multiGet(keys) { return keys.map(k => structuredClone(this.m.get(k))); }
   async multiSet(data, { overwrite = true } = {}) { for (const [k, v] of Object.entries(data)) if (overwrite || !this.m.has(k)) this.m.set(k, structuredClone(v)); } }
 const TagTranslations = new Function('KeyStorage', 'helpers', 'ppixiv', ttSrc + '; return TagTranslations;')(KeyStorage, {}, { settings: { get: () => false } });
 function grab(name) { const i = main.search(new RegExp(`^(async )?function ${name}\\(`, 'm')); let d = 0; for (let k = main.indexOf('{', i); k < main.length; k++) { if (main[k] == '{') d++; else if (main[k] == '}' && --d == 0) return main.slice(i, k + 1); } }
@@ -22,3 +22,37 @@ assert.equal(await tt.getTranslation('ブルーアーカイブ'), '碧蓝档案'
 assert.equal(await tt.getTranslation('原神'), '原神');
 assert.deepEqual(tt._db.m.get('ブルーアーカイブ'), { tag: 'ブルーアーカイブ', translation: { zh: '碧蓝档案', en: 'Blue Archive' }, romaji: 'buruuaakaibu' });
 console.log('ok   Chinese translations survive English-only updates and are preferred');
+
+// A cached English tag is updated by search results and work info at the same time.
+// Snapshot reads match IndexedDB: later writes don't change an earlier read's result.
+await tt.addTranslations([{ tag: 'アークナイツ', translation: { en: 'Arknights' } }]);
+const concurrent = await Promise.all([
+  tt.addTranslations([{ tag: 'アークナイツ', translation: { zh: '明日方舟' } }]),
+  tt.addTranslations([{ tag: 'アークナイツ', translation: { en: 'Arknights' }, romaji: 'aakunaitsu' }]),
+  tt.getTranslation('アークナイツ'),
+]);
+assert.deepEqual(tt._db.m.get('アークナイツ'), {
+  tag: 'アークナイツ', translation: { en: 'Arknights', zh: '明日方舟' }, romaji: 'aakunaitsu',
+});
+assert.equal(await tt.getTranslation('アークナイツ'), '明日方舟');
+assert.equal(concurrent[2], '明日方舟', 'reads wait for the already queued translation updates');
+console.log('ok   Concurrent search and work updates preserve Chinese translations');
+
+// A failed write rejects its caller, but the next batch can still be saved.
+const multiSet = tt._db.multiSet;
+tt._db.multiSet = async () => { throw new Error('write failed'); };
+await assert.rejects(tt.addTranslations([{ tag: 'failed', translation: { zh: '失败' } }]), /write failed/);
+tt._db.multiSet = multiSet;
+await tt.addTranslations([{ tag: 'girl', translation: { zh: '女孩' } }]);
+assert.equal(await tt.getTranslation('girl'), '女孩');
+console.log('ok   A failed write does not block later translation batches');
+
+// Keep the session fallback when IndexedDB is unavailable.
+tt._db.multiGet = async () => ({});
+tt._db.multiSet = async () => {};
+await Promise.all([
+  tt.addTranslations([{ tag: 'ぼっち・ざ・ろっく!', translation: { zh: '孤独摇滚!' } }]),
+  tt.addTranslations([{ tag: 'ぼっち・ざ・ろっく!', translation: { en: 'Bocchi the Rock!' } }]),
+]);
+assert.equal(await tt.getTranslation('ぼっち・ざ・ろっく!'), '孤独摇滚!');
+console.log('ok   Concurrent updates preserve translations without IndexedDB');

@@ -535,23 +535,31 @@ function setupChineseTags()
     tagTranslations.pzChinese = true;
 
     const addTranslations = tagTranslations.addTranslations;
-    tagTranslations.addTranslations = async function(tagList, options)
+    // Keep each read, merge and write together.  Search results and full work info can
+    // arrive at once, so the next batch must wait for the previous write to finish.
+    let pendingTranslations = Promise.resolve();
+    tagTranslations.addTranslations = function(tagList, options)
     {
-        let stored = null;
-        try {
-            stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
-        } catch(e) {
-        }
+        const result = pendingTranslations.then(async () => {
+            let stored = null;
+            try {
+                stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
+            } catch(e) {
+            }
 
-        const merged = tagList.map((tag, i) => {
-            const translation = { ...(stored?.[i]?.translation ?? sessionTagTranslations.get(tag.tag)) };
-            for(const [lang, value] of Object.entries(tag.translation ?? {}))
-                if(value)
-                    translation[lang] = value;
-            sessionTagTranslations.set(tag.tag, translation);
-            return { ...tag, translation, romaji: tag.romaji ?? stored?.[i]?.romaji };
+            const merged = tagList.map((tag, i) => {
+                const translation = { ...(stored?.[i]?.translation ?? sessionTagTranslations.get(tag.tag)) };
+                for(const [lang, value] of Object.entries(tag.translation ?? {}))
+                    if(value)
+                        translation[lang] = value;
+                sessionTagTranslations.set(tag.tag, translation);
+                return { ...tag, translation, romaji: tag.romaji ?? stored?.[i]?.romaji };
+            });
+            return await addTranslations.call(this, merged, options);
         });
-        return await addTranslations.call(this, merged, options);
+        // Return the error to this caller without blocking later batches.
+        pendingTranslations = result.catch(() => {});
+        return result;
     };
 
     // ppixiv always asks for "en".  Answer with Chinese when there is one.
@@ -560,6 +568,7 @@ function setupChineseTags()
         if(!this.enabled)
             return {};
 
+        await pendingTranslations;
         const info = await this.getTagInfo(tags);
         const result = {};
         for(const tag of tags)
@@ -837,6 +846,7 @@ const THUMB_MAX_FAILURES = 5;
 
 const thumbStates = new WeakMap(); // img -> { base, prefix, path, mediaId, tier, upgrading, failed }
 const thumbTimings = []; // { start, end } of recent thumbnail downloads
+const failedThumbUrls = new Set(); // Keep failures when ppixiv rebuilds thumbnail elements.
 let thumbLoadMs = null;
 let thumbFailures = 0;
 
@@ -922,7 +932,7 @@ function trackThumb(img, url)
         return null;
     }
 
-    const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: false };
+    const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: failedThumbUrls.has(url) };
     thumbStates.set(img, state);
     thumbResizeObserver.observe(img);
     thumbVisibilityObserver.observe(img);
@@ -938,7 +948,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
         if(active && this.classList.contains("thumb") && thumbsEnabled())
         {
             const state = trackThumb(this, String(value));
-            if(state != null)
+            if(state != null && !state.failed)
             {
                 // At this point ppixiv has only decided the size it wants for the thumbnail.
                 // It adds the thumbnail to a row right after, in the same task, and stretches
@@ -949,7 +959,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
                 state.tier = pickThumbTier(state.mediaId, box.origWidth, box.origHeight);
                 value = thumbUrl(state, state.tier);
                 queueMicrotask(() => {
-                    if(thumbStates.get(this) != state || box.currentWidth == null)
+                    if(thumbStates.get(this) != state || state.failed || !thumbsEnabled() || box.currentWidth == null)
                         return;
                     const tier = pickThumbTier(state.mediaId, box.currentWidth, box.currentHeight);
                     if(tier > state.tier)
@@ -977,6 +987,8 @@ function upgradeThumb(img, state, tier)
         if(thumbStates.get(img) != state || state.upgrading != tier)
             return;
         state.upgrading = null;
+        if(state.failed || !thumbsEnabled())
+            return;
         state.tier = tier;
         setImgSrc(img, url);
     };
@@ -996,6 +1008,9 @@ function thumbFailed(state)
     if(state.failed)
         return;
     state.failed = true;
+    if(failedThumbUrls.has(state.base))
+        return;
+    failedThumbUrls.add(state.base);
     if(navigator.onLine !== false)
         thumbFailures++;
 }
@@ -1063,7 +1078,7 @@ new PerformanceObserver((list) => {
 function maybeUpgradeThumb(img, width, height)
 {
     const state = thumbStates.get(img);
-    if(state == null || state.failed || !active || !img.isConnected)
+    if(state == null || state.failed || !active || !img.isConnected || !thumbsEnabled())
         return;
     const tier = pickThumbTier(state.mediaId, width, height);
     if(tier > state.tier && tier != state.upgrading)

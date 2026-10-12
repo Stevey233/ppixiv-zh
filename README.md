@@ -1,51 +1,108 @@
 # ppixiv 中文与现代界面
 
-这是 [ppixiv](https://github.com/ppixiv/ppixiv) 的配套油猴脚本。它把 ppixiv 的界面翻译成简体中文，并换成一套现代的深色和浅色主题。脚本不修改 ppixiv 本身，所以 ppixiv 仍然可以从 Greasy Fork 自动更新。
+[ppixiv](https://github.com/ppixiv/ppixiv) 的配套油猴脚本，提供简体中文界面、中文标签译名和深浅色主题，也支持推荐类型筛选、高清缩略图和原图预加载。ppixiv 仍从 Greasy Fork 单独更新。
 
 ## 安装
 
-1. 先安装 Tampermonkey 和 ppixiv。
-2. 打开 <https://raw.githubusercontent.com/Stevey233/ppixiv-zh/main/dist/ppixiv-zh.user.js>，Tampermonkey 会弹出安装页面。
+1. 安装 Tampermonkey 和 [ppixiv](https://github.com/ppixiv/ppixiv)。
+2. 打开 [脚本安装链接](https://raw.githubusercontent.com/Stevey233/ppixiv-zh/main/dist/ppixiv-zh.user.js)，在 Tampermonkey 页面确认安装。
+3. 打开 Pixiv，进入 ppixiv 界面。
 
-Tampermonkey 会定期检查 `dist/ppixiv-zh.meta.js` 里的版本号，有新版本时自动更新。
+Tampermonkey 会通过 `dist/ppixiv-zh.meta.js` 检查版本，有新版本时自动更新。
 
-0.8.0 及更早的版本用的是另一个 namespace，Tampermonkey 会把新版本当成另一个脚本。安装新版本后，在 Tampermonkey 里删掉旧的那份，否则两份会同时运行。
+如果装过 0.8.0 或更早的版本，安装后请在 Tampermonkey 中删除旧脚本。新版本更换了 namespace，脚本管理器会把它当作另一个脚本，两份同时启用会重复运行。
 
-## 改了什么
+## 界面和标签
 
-- 翻译 ppixiv 的菜单、按钮、提示、设置页和消息，相对时间显示为"3 小时前"这样的格式。作品标题、标签、用户名、作品说明和 ppixiv 的更新日志不翻译。
-- 顶部工具栏、看图信息面板、下拉菜单、对话框改成毛玻璃卡片，按钮改成圆角胶囊，设置里的复选框改成开关，缩略图加圆角和悬停描边。
-- 长按右键弹出菜单里的"收藏标签"按钮换成了"收藏并下载原图"：按住右键，再用左键点这个按钮，就会收藏作品（公开或非公开跟随 ppixiv 的"默认非公开收藏和关注"设置，已收藏的不会重复收藏），同时下载原图。单张作品下载原图，多页作品下载全部页的 ZIP，动图下载 MKV。收藏标签仍然可以在看图信息面板里编辑。
-- 长按右键弹出菜单里的"点赞"按钮换成了"相似作品"：按住右键，再用左键点这个按钮，就会打开这个作品的相似插画页，和"更多 → 相似插画"是同一个页面。点赞仍然可以在看图信息面板里点，或者按 Ctrl+V。
-- "推荐作品"页面加了"全部类型 / 插画 / 漫画"筛选。Pixiv 的推荐接口只能按年龄分级筛选，脚本在 ppixiv 拿到结果之前按作品类型过滤。"插画"包括动图。选择会记在浏览器里，筛选后每次加载的作品会变少。某一批推荐里一个符合的作品都没有时，脚本会再请求，最多共 4 次，仍然没有就停止加载并提示。筛选只作用于推荐作品页，不影响相似作品页。
-- 看图时双击图片不再进入浏览器全屏。需要全屏时按 F11，或点弹出菜单里的全屏按钮。移动端（包括 iPad）的双击缩放不受影响。
-- 标签翻译显示中文。ppixiv 原本只显示英文译名，脚本让 Pixiv 返回中文译名并优先显示。没有中文译名的日文标签仍显示英文译名；标签本身是中文或纯汉字时，不再显示英文译名，直接显示原标签（比如"原神"不再显示成 Genshin Impact）。中文译名要等 Pixiv 在搜索、推荐等页面返回过这个标签之后才有。想恢复英文，在页面控制台执行 `localStorage.setItem("ppx-zh-tag-language", "en")` 后刷新。
-- 有深色和浅色两套配色。顶部工具栏齿轮左边的按钮可以在"深色 → 浅色 → 跟随系统"之间切换，默认深色。选择存在浏览器里。
-- 预加载原图：鼠标在缩略图上停留 0.3 秒，就开始请求作品信息并下载原图（常看的作者还能直接推算出原图地址），点开时通常已经下载完。同时也会下载 ppixiv 看图时先显示的 540 预览图（约 40 KB），因为缩略图换成了别的尺寸，这张图不再在缓存里。看多页作品时，同时下载后面 2 页。同时进行的预加载最多 3 个，新的会取消最旧的。每分钟最多因为悬停预加载 30 个作品，避免请求太频繁被 Pixiv 限制。被屏蔽的作品不预加载，浏览器开了"节省流量"时完全不预加载。代价是鼠标停过但没点开的作品也会下载原图，多用一些流量。
-- 缩略图更清晰。ppixiv 原本用的是长边 540、画质 70 的 JPEG，在高分屏上会被放大，竖图最明显。脚本按每张缩略图在屏幕上的实际像素（算上系统缩放和浏览器缩放）从 Pixiv 提供的三档 WebP 里挑最小的够用的一档：宽 600 高 1200 画质 90、长边 1200 画质 80、长边 1200 画质 90，每张 40 到 180 KB。脚本在 ppixiv 排好整行之后、请求发出之前就选好档位，原来的 540 图不会再下载；之后缩略图被放大（拖动缩略图大小滑块、浏览器缩放）时，会在后台加载更大的一档，下载完再替换。
-- 缩略图档位还跟网速走。脚本按同时下载的张数折算出每张缩略图单独下载要多久，取最近 40 张的中位数：超过 0.4 秒（约 2 Mbps）就不用画质 90 的 1200 档，超过 1 秒（约 1 Mbps）只用最小一档；网速恢复后，屏幕上的缩略图会自动换回清晰的。浏览器开了"节省流量"时只用最小一档。某张图的大档位加载失败，这张图就退回 ppixiv 原来的图，之后也不再尝试换大图；累计有 5 张不同的图失败，就在这次浏览中停用这个功能。断网期间的失败不计数。想关掉，在页面控制台执行 `localStorage.setItem("ppx-zh-thumb-quality", "off")` 后刷新。
-- 字体优先使用 MiSans、HarmonyOS Sans、苹方、Noto Sans CJK SC，按系统里已有的字体自动选择。
+菜单、按钮、提示、设置和消息显示为简体中文，相对时间显示为 "3 小时前"。作品信息面板里的作品标题、用户名和说明保留原文，ppixiv 的更新日志也保留原文。
 
-## 工作方式
+工具栏、信息面板、菜单和对话框使用半透明背景，按钮和缩略图使用圆角，设置中的复选框显示为开关。中文字体优先使用系统已安装的 MiSans、HarmonyOS Sans、苹方和 Noto Sans CJK SC。
 
-- 脚本和 ppixiv 一样运行在页面环境里。ppixiv 会替换页面的 `setTimeout`、`fetch` 和 `createElement`，新建 `<style>` 会报错，所以主题样式用构造样式表（`document.adoptedStyleSheets`）注入。
-- 只有检测到 ppixiv 正在运行时，脚本才给 `<html>` 加上 `ppx-zh` 类并注入样式，Pixiv 原版页面不受影响。
-- 只翻译带 `widget` 类的元素，也就是 ppixiv 自己的界面。Powerful Pixiv Downloader、UTags 等扩展插入的内容不会被改动。
+顶部工具栏齿轮左侧的按钮按深色、浅色、跟随系统的顺序切换，默认深色，选择会保存在浏览器中。
+
+标签优先显示 Pixiv 返回的中文译名。日文标签没有中文译名时使用英文；中文或纯汉字标签没有含汉字的译名时保留原标签，例如 "原神" 不会显示成 Genshin Impact。中文译名需要先在搜索、推荐等页面收到，同一标签的英文数据不会覆盖已保存的中文译名。
+
+## 推荐作品筛选
+
+推荐作品页提供全部类型、插画、漫画三个选项，插画包含动图，选择会保存在浏览器中。筛选在本地进行，所以每批结果可能少于未筛选时。
+
+如果一批结果中没有所选类型，脚本会继续请求，最多共 4 次。仍没有结果时停止加载并提示，可以点刷新重新获取。相似作品页不使用这个筛选。
+
+## 看图和右键菜单
+
+桌面端双击图片不会进入浏览器全屏。需要全屏时按 F11，或点右键菜单的全屏按钮。移动端和 iPad 的双击缩放照常使用。
+
+按住右键打开菜单，再用左键点对应按钮：
+
+- 收藏并下载原图，替换原来的收藏标签按钮。收藏的公开范围跟随 ppixiv 的默认设置，已收藏的作品不会重复收藏。单张作品下载原图，多页作品下载全部页的 ZIP，动图下载 MKV。收藏标签仍可在作品信息面板里编辑。
+- 相似作品，替换原来的点赞按钮，打开与 "更多 > 相似插画" 相同的页面。点赞仍可在作品信息面板中操作，也可按 Ctrl+V。
+
+## 缩略图和预加载
+
+缩略图按屏幕上的实际像素大小选择 WebP 尺寸，包含系统缩放和浏览器缩放。三档分别为 `600x1200_90_webp`、`1200x1200_80_webp`、`1200x1200_90_webp`，每张通常约 40 到 180 KB。调大缩略图后，脚本在后台下载更大的版本，加载完再替换。
+
+脚本根据最近 40 张缩略图的下载时间估算网速，并折算同时下载的数量。单张估计耗时超过 0.4 秒时不用最高画质，超过 1 秒时只用最小尺寸；网速恢复后重新检查可见缩略图。浏览器开启节省流量时只用最小尺寸。
+
+某张图加载较大尺寸失败后，本次浏览不再重试该 URL。首次加载失败时回到 ppixiv 原来的缩略图，后台升级失败时保留当前图片。重建缩略图不会重复计数，累计 5 个不同 URL 失败后停止新的高清请求和升级。断网期间的失败不计入这个阈值。
+
+鼠标在缩略图上停留 0.3 秒后，脚本请求作品信息并预加载原图，也会下载看图时先显示的 540 预览图。看多页作品时预加载后面 2 页。图片预加载最多同时进行 3 个，新请求会取消最旧的未完成请求；悬停触发的预加载每分钟最多 30 次。
+
+被屏蔽的作品不预加载，浏览器开启节省流量时关闭预加载。悬停过但没有点开的作品也可能下载原图，因此这个功能会增加流量。
+
+## 可选设置
+
+在 Pixiv 页面的控制台执行命令后刷新：
+
+```js
+// 恢复英文标签译名。
+localStorage.setItem("ppx-zh-tag-language", "en");
+
+// 关闭高清缩略图。
+localStorage.setItem("ppx-zh-thumb-quality", "off");
+```
+
+删除对应设置即可恢复默认行为：
+
+```js
+localStorage.removeItem("ppx-zh-tag-language");
+localStorage.removeItem("ppx-zh-thumb-quality");
+```
 
 ## 修改和构建
 
 源文件在 `src/`：
 
-- `dict.js`：翻译词典 `DICT`、带变量的句式 `PATTERNS`、不翻译的区域 `SKIP_SELECTOR`
-- `theme.css`：主题样式，所有规则都限定在 `html.ppx-zh` 下
-- `main.js`：翻译和样式注入逻辑
-- `header.js`：油猴脚本头
+- `dict.js` 保存翻译词典、带变量的句式和不翻译的区域。
+- `theme.css` 保存主题样式，规则限定在 `html.ppx-zh` 下。
+- `main.js` 处理翻译、主题和功能扩展。
+- `header.js` 保存油猴脚本信息和版本号。
 
-修改后运行 `node build.mjs`，会重新生成 `dist/ppixiv-zh.user.js` 和只含脚本头的 `dist/ppixiv-zh.meta.js`。`dist/` 也提交到仓库里，Tampermonkey 从这里安装和检查更新。发布新版本时要提高 `src/header.js` 里的 `@version`，否则 Tampermonkey 不会更新。
+脚本在页面环境中运行。ppixiv 会替换 `setTimeout`、`fetch` 和 `createElement`，因此定时器和请求使用它保留的接口，主题通过 `document.adoptedStyleSheets` 注入。检测到 ppixiv 界面后才启用主题，界面翻译限定在带 `widget` 类的元素内。
 
-`test/` 里的测试在 Node 里运行，不需要浏览器：
+构建不需要安装依赖：
 
-- `node test/unit.mjs`：推荐筛选的重试、请求 URL 判断、缩略图网速估算、标签译名的选择规则。
-- `node test/tag-translations.mjs [ppixiv 的 tag-translations.js 路径]`：把脚本的包装套在 ppixiv 真正的 `TagTranslations` 类上，检查中文译名不会被只有英文的数据覆盖。默认读取 `~/scratch/ppixiv-src` 里的 ppixiv 源码。
+```sh
+node build.mjs
+```
 
-想找出还没翻译的文字，可以在脚本开头加一行 `var PZ_DEBUG = true;`，在页面控制台执行 `document.dispatchEvent(new Event("pz-dump"))`，然后读取 `document.documentElement.dataset.pzMissing`。
+构建会生成 `dist/ppixiv-zh.user.js` 和只含脚本头的 `dist/ppixiv-zh.meta.js`。发布时提高 `src/header.js` 中的 `@version`，重新构建，并把两个生成文件一同提交。
+
+## 测试
+
+测试在 Node.js 中运行：
+
+```sh
+node test/unit.mjs
+node test/thumbnails.mjs
+node test/tag-translations.mjs /path/to/ppixiv/web/vview/misc/tag-translations.js
+```
+
+`unit.mjs` 检查推荐筛选、请求 URL、网速估算和标签译名选择。`thumbnails.mjs` 检查失败去重、重建元素后的降级，以及停用后是否仍发起升级或替换图片。
+
+`tag-translations.mjs` 使用 ppixiv 的实际 `TagTranslations` 类，检查并发更新是否保留中文、写入失败后能否继续保存，以及 IndexedDB 不可用时的会话缓存。省略源码路径时，默认读取 `~/scratch/ppixiv-src/repo/web/vview/misc/tag-translations.js`。
+
+排查漏翻译的文字时，可在脚本开头加入 `var PZ_DEBUG = true;`，然后在页面控制台执行 `document.dispatchEvent(new Event("pz-dump"))`。结果保存在 `document.documentElement.dataset.pzMissing`。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。
