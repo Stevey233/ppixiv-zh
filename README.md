@@ -1,11 +1,15 @@
 # ppixiv 中文与现代界面
 
-这是 [ppixiv](https://github.com/ppixiv/ppixiv) 的配套油猴脚本。它把 ppixiv 的界面翻译成简体中文，并换成一套现代的深色主题。脚本不修改 ppixiv 本身，所以 ppixiv 仍然可以从 Greasy Fork 自动更新。
+这是 [ppixiv](https://github.com/ppixiv/ppixiv) 的配套油猴脚本。它把 ppixiv 的界面翻译成简体中文，并换成一套现代的深色和浅色主题。脚本不修改 ppixiv 本身，所以 ppixiv 仍然可以从 Greasy Fork 自动更新。
 
 ## 安装
 
 1. 先安装 Tampermonkey 和 ppixiv。
-2. 用 Tampermonkey 安装 `dist/ppixiv-zh.user.js`。
+2. 打开 <https://raw.githubusercontent.com/Stevey233/ppixiv-zh/main/dist/ppixiv-zh.user.js>，Tampermonkey 会弹出安装页面。
+
+Tampermonkey 会定期检查 `dist/ppixiv-zh.meta.js` 里的版本号，有新版本时自动更新。
+
+0.8.0 及更早的版本用的是另一个 namespace，Tampermonkey 会把新版本当成另一个脚本。安装新版本后，在 Tampermonkey 里删掉旧的那份，否则两份会同时运行。
 
 ## 改了什么
 
@@ -37,7 +41,7 @@
 - `main.js`：翻译和样式注入逻辑
 - `header.js`：油猴脚本头
 
-修改后运行 `node build.mjs`，会重新生成 `dist/ppixiv-zh.user.js`。`dist/` 也提交到仓库里，Tampermonkey 安装的就是这个文件。
+修改后运行 `node build.mjs`，会重新生成 `dist/ppixiv-zh.user.js` 和只含脚本头的 `dist/ppixiv-zh.meta.js`。`dist/` 也提交到仓库里，Tampermonkey 从这里安装和检查更新。发布新版本时要提高 `src/header.js` 里的 `@version`，否则 Tampermonkey 不会更新。
 
 `test/` 里的测试在 Node 里运行，不需要浏览器：
 
