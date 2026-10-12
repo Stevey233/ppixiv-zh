@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         ppixiv 中文与现代界面
 // @namespace    https://github.com/Stevey233/ppixiv-zh
-// @version      0.8.1
+// @version      0.8.2
 // @description  给 ppixiv 汉化界面和标签译名，换成现代化的深色或浅色主题。需要同时安装 ppixiv。
 // @author       Stevey233
+// @license      MIT
 // @homepageURL  https://github.com/Stevey233/ppixiv-zh
 // @supportURL   https://github.com/Stevey233/ppixiv-zh/issues
 // @updateURL    https://raw.githubusercontent.com/Stevey233/ppixiv-zh/main/dist/ppixiv-zh.meta.js
@@ -14,6 +15,29 @@
 // @noframes
 // ==/UserScript==
 
+/*
+MIT License
+
+Copyright (c) 2026 Stevey233
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
 (function() {
 "use strict";
 // English UI string -> Simplified Chinese.  Keys are matched against the trimmed text of a
@@ -1073,23 +1097,31 @@ function setupChineseTags()
     tagTranslations.pzChinese = true;
 
     const addTranslations = tagTranslations.addTranslations;
-    tagTranslations.addTranslations = async function(tagList, options)
+    // Keep each read, merge and write together.  Search results and full work info can
+    // arrive at once, so the next batch must wait for the previous write to finish.
+    let pendingTranslations = Promise.resolve();
+    tagTranslations.addTranslations = function(tagList, options)
     {
-        let stored = null;
-        try {
-            stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
-        } catch(e) {
-        }
+        const result = pendingTranslations.then(async () => {
+            let stored = null;
+            try {
+                stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
+            } catch(e) {
+            }
 
-        const merged = tagList.map((tag, i) => {
-            const translation = { ...(stored?.[i]?.translation ?? sessionTagTranslations.get(tag.tag)) };
-            for(const [lang, value] of Object.entries(tag.translation ?? {}))
-                if(value)
-                    translation[lang] = value;
-            sessionTagTranslations.set(tag.tag, translation);
-            return { ...tag, translation, romaji: tag.romaji ?? stored?.[i]?.romaji };
+            const merged = tagList.map((tag, i) => {
+                const translation = { ...(stored?.[i]?.translation ?? sessionTagTranslations.get(tag.tag)) };
+                for(const [lang, value] of Object.entries(tag.translation ?? {}))
+                    if(value)
+                        translation[lang] = value;
+                sessionTagTranslations.set(tag.tag, translation);
+                return { ...tag, translation, romaji: tag.romaji ?? stored?.[i]?.romaji };
+            });
+            return await addTranslations.call(this, merged, options);
         });
-        return await addTranslations.call(this, merged, options);
+        // Return the error to this caller without blocking later batches.
+        pendingTranslations = result.catch(() => {});
+        return result;
     };
 
     // ppixiv always asks for "en".  Answer with Chinese when there is one.
@@ -1098,6 +1130,7 @@ function setupChineseTags()
         if(!this.enabled)
             return {};
 
+        await pendingTranslations;
         const info = await this.getTagInfo(tags);
         const result = {};
         for(const tag of tags)
@@ -1375,6 +1408,7 @@ const THUMB_MAX_FAILURES = 5;
 
 const thumbStates = new WeakMap(); // img -> { base, prefix, path, mediaId, tier, upgrading, failed }
 const thumbTimings = []; // { start, end } of recent thumbnail downloads
+const failedThumbUrls = new Set(); // Keep failures when ppixiv rebuilds thumbnail elements.
 let thumbLoadMs = null;
 let thumbFailures = 0;
 
@@ -1460,7 +1494,7 @@ function trackThumb(img, url)
         return null;
     }
 
-    const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: false };
+    const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: failedThumbUrls.has(url) };
     thumbStates.set(img, state);
     thumbResizeObserver.observe(img);
     thumbVisibilityObserver.observe(img);
@@ -1476,7 +1510,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
         if(active && this.classList.contains("thumb") && thumbsEnabled())
         {
             const state = trackThumb(this, String(value));
-            if(state != null)
+            if(state != null && !state.failed)
             {
                 // At this point ppixiv has only decided the size it wants for the thumbnail.
                 // It adds the thumbnail to a row right after, in the same task, and stretches
@@ -1487,7 +1521,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
                 state.tier = pickThumbTier(state.mediaId, box.origWidth, box.origHeight);
                 value = thumbUrl(state, state.tier);
                 queueMicrotask(() => {
-                    if(thumbStates.get(this) != state || box.currentWidth == null)
+                    if(thumbStates.get(this) != state || state.failed || !thumbsEnabled() || box.currentWidth == null)
                         return;
                     const tier = pickThumbTier(state.mediaId, box.currentWidth, box.currentHeight);
                     if(tier > state.tier)
@@ -1515,6 +1549,8 @@ function upgradeThumb(img, state, tier)
         if(thumbStates.get(img) != state || state.upgrading != tier)
             return;
         state.upgrading = null;
+        if(state.failed || !thumbsEnabled())
+            return;
         state.tier = tier;
         setImgSrc(img, url);
     };
@@ -1534,6 +1570,9 @@ function thumbFailed(state)
     if(state.failed)
         return;
     state.failed = true;
+    if(failedThumbUrls.has(state.base))
+        return;
+    failedThumbUrls.add(state.base);
     if(navigator.onLine !== false)
         thumbFailures++;
 }
@@ -1601,7 +1640,7 @@ new PerformanceObserver((list) => {
 function maybeUpgradeThumb(img, width, height)
 {
     const state = thumbStates.get(img);
-    if(state == null || state.failed || !active || !img.isConnected)
+    if(state == null || state.failed || !active || !img.isConnected || !thumbsEnabled())
         return;
     const tier = pickThumbTier(state.mediaId, width, height);
     if(tier > state.tier && tier != state.upgrading)

@@ -6,6 +6,7 @@ const header = read('./src/header.js');
 const css = read('./src/theme.css');
 const out = [
     header,
+    `/*\n${read('./LICENSE').trim()}\n*/`,
     '(function() {',
     '"use strict";',
     read('./src/dict.js'),
