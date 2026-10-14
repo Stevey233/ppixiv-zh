@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ppixiv 中文与现代界面
 // @namespace    https://github.com/Stevey233/ppixiv-zh
-// @version      0.8.3
+// @version      0.8.4
 // @description  给 ppixiv 汉化界面和标签译名，换成现代化的深色或浅色主题。需要同时安装 ppixiv。
 // @author       Stevey233
 // @license      MIT
@@ -124,6 +124,7 @@ const DICT = {
     "Original": "原创",
     "Original rankings": "原创排行",
     "AI": "AI",
+    "AI-generated": "AI 生成",
     "Show AI works": "显示 AI 作品",
     "Male": "男性",
     "Popular with men": "受男性欢迎",
@@ -443,6 +444,8 @@ const DICT = {
     "Rename group:": "重命名分组：",
     "Add section": "添加分组",
     "Delete tag group": "删除标签分组",
+    // ppixiv sets this with innerText, which splits the message into a text node per line.
+    "Delete this group and all tags inside it? This can't be undone.": "删除此分组及其中的所有标签？此操作无法撤销。",
     "Edit": "编辑",
     "Saved tag already exists": "这个标签已经保存过了",
     "Saved tag updated": "已更新保存的标签",
@@ -520,7 +523,6 @@ const PATTERNS = [
     [/^Page (\d+)$/, "第 $1 页"],
     [/^(\d+) pages?$/, "共 $1 页"],
     [/^Refresh search from page (\d+)$/, "从第 $1 页刷新搜索"],
-    [/^by (.+)$/, "作者：$1"],
     [/^Show (R18G?|ALL) works$/i, (m, a) => a.toUpperCase() == "ALL" ? "显示全部作品" : `显示 ${a.toUpperCase()} 作品`],
     [/^(Mute|Unmute) this user$/, (m, a) => a == "Mute" ? "屏蔽此用户" : "取消屏蔽此用户"],
     [/^Muted the (tag|user) (.+)$/, (m, t, l) => `已屏蔽${t == "tag" ? "标签" : "用户"} ${l}`],
@@ -556,24 +558,60 @@ const PATTERNS = [
     [/^Error following user (\d+): (.+)$/, "关注用户 $1 时出错：$2"],
     [/^The file "(.+)" doesn't contain exported ppixiv data\.$/, "文件「$1」不包含 ppixiv 导出的数据。"],
     [/^Saved Tags (\d+)$/, "已保存的标签 $1"],
+    // The heading of your own bookmarks: "1234 Private Bookmarks / tag".  The count is missing
+    // until it loads.
+    [/^(?:(\d+) )?(Public |Private )?Bookmarks?(?: \/ (.+))?$/, (m, n, kind, tag) =>
+        (n ? `${n} 个` : "") + (kind == "Public " ? "公开" : kind == "Private " ? "非公开" : "") + "收藏" +
+        (tag == null ? "" : tag == "untagged" ? " / 未分类" : ` / ${tag}`)],
+    [/^(\d+) frames$/, "$1 帧"],
+    [/^Suggestions for (.+)$/, "「$1」的建议"],
+    // The time filter button shows "2 years" after "2 years ago" is picked.
+    [/^([1-7]) years?$/, "$1 年前"],
+    [/^Clear (\d+) recent search(?:es)?\?$/, "清除 $1 条最近搜索？"],
+    [/^This group contains (\d+) tags?\.$/, "此分组包含 $1 个标签。"],
+    [/^Artist: (.+)$/, "作者：$1"],
     [/^(\d+(?:\.\d+)?) seconds?$/, "$1 秒"],
 ];
 
-// Text that should never be translated because it's an icon ligature, user content, or
-// the ppixiv changelog.
+// Icon ligatures are never text, even inside the rows ALLOW_SELECTOR lets through.
+const ICON_SELECTOR = ".font-icon, .material-icons, .ppixiv-icon";
+
+// Text that should never be translated because it's user content or the ppixiv changelog.
 const SKIP_SELECTOR = [
-    ".font-icon", ".material-icons", ".ppixiv-icon",
-    "input", "textarea", "[contenteditable]", "script", "style",
+    "textarea", "[contenteditable]", "script", "style",
     ".description", ".title", ".author", ".folder-text", ".tag", ".tag-entry", ".tag-name",
     ".tag-list", ".search-tags", ".word", ".user-name", ".username",
     ".thumbnail-label", ".whats-new-dialog", ".follow-tag", ".utags_ul", ".avatar-widget",
+    // User names and tags that ppixiv shows outside the containers above.
+    ".thumbnail-box .muted-label", ".follow-widget .view-posts .label",
+    // ppixiv copies the hovered element's data-popup here, and that is already translated
+    // unless it came from user content, like an avatar's user name.
+    ".tooltip-display-text",
+    // Saved search groups are named by the user.  "Saved tags" is ppixiv's default name.
+    ".tag-section[data-group]:not([data-group='Saved tags']) > .label",
 ].join(",");
 
-// Exceptions inside skipped containers: the bookmark tag dropdown is a .tag-list, but its
-// "Add", "Refresh" and "Loading..." rows are UI, not tags.
-const ALLOW_SELECTOR = ".popup-bookmark-tag-entry:not(.tag-toggle)";
+// Exceptions inside skipped containers: fixed UI rows that sit among user tags.
+// - the bookmark tag dropdown's "Add" and "Refresh" rows, and its "Loading..." row
+// - the "All", "All bookmarks" and "All tags" default rows of tag filter dropdowns, and the
+//   "Untagged" row that always follows "All bookmarks"
+// - "Add new tag", always the first row of the follow tag list
+// - the "AI-generated" row of the info panel's tag list, the only row without a link
+const ALLOW_SELECTOR = [
+    ".popup-bookmark-tag-entry:not(.tag-toggle)", ".tag-list > .loading",
+    ".tag-entry[data-default]", ".tag-entry[data-default] + .tag-entry[data-type=bookmark-tag]",
+    ".vertical-list > .follow-tag:first-child", ".tag-list > .tag-entry:not([href])",
+].join(",");
 
-const THEME_CSS = "/* Modern theme for ppixiv.  Every rule is scoped to html.ppx-zh, which the script only sets\n * while ppixiv is running, so Pixiv's own pages are never restyled. */\n\nhtml.ppx-zh {\n    --pz-bg: #0c0d10;\n    --pz-surface: rgba(22, 23, 28, 0.78);\n    --pz-surface-strong: rgba(20, 21, 26, 0.92);\n    --pz-surface-solid: #16171c;\n    --pz-raise: rgba(255, 255, 255, 0.055);\n    --pz-raise-hover: rgba(255, 255, 255, 0.1);\n    --pz-raise-active: rgba(255, 255, 255, 0.14);\n    --pz-border: rgba(255, 255, 255, 0.08);\n    --pz-border-strong: rgba(255, 255, 255, 0.14);\n    --pz-text: #eceef2;\n    --pz-text-2: #a6aab4;\n    --pz-text-3: #6d717c;\n    --pz-accent: #3a9dff;\n    --pz-accent-hover: #5cb0ff;\n    --pz-accent-soft: rgba(58, 157, 255, 0.18);\n    --pz-accent-ring: rgba(58, 157, 255, 0.45);\n    --pz-heart: #ff4060;\n    --pz-radius: 16px;\n    --pz-radius-md: 12px;\n    --pz-radius-sm: 9px;\n    --pz-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.7), 0 4px 14px rgba(0, 0, 0, 0.35);\n    --pz-shadow-sm: 0 6px 18px -6px rgba(0, 0, 0, 0.6);\n    --pz-blur: blur(22px) saturate(150%);\n    --pz-text-strong: #fff;\n    --pz-selected-text: #d8ebff;\n    --pz-tag-text: #cfe3ff;\n    --pz-scroll-thumb: rgba(255, 255, 255, 0.14);\n    --pz-scroll-thumb-hover: rgba(255, 255, 255, 0.3);\n    --pz-tip-bg: rgba(14, 15, 19, 0.94);\n    --pz-toast-bg: rgba(18, 19, 24, 0.9);\n    --pz-input-bg: rgba(255, 255, 255, 0.04);\n    --pz-input-bg-focus: rgba(255, 255, 255, 0.06);\n    --pz-thumb-placeholder: #15161a;\n    --pz-desc-bg: rgba(255, 255, 255, 0.04);\n    --pz-desc-text: #c9ccd3;\n    --pz-dialog-bg: rgba(18, 19, 24, 0.96);\n    --pz-switch-off: rgba(255, 255, 255, 0.16);\n    --pz-menu-bg: #17181d;\n    --pz-menu-shadow: rgba(0, 0, 0, 0.55);\n    --pz-menu-button: rgba(255, 255, 255, 0.06);\n    --pz-menu-button-text: #a9adb6;\n    --pz-menu-button-disabled: rgba(255, 255, 255, 0.03);\n    --pz-menu-button-disabled-text: #4f525a;\n    --pz-menu-button-hover: rgba(255, 255, 255, 0.16);\n    --pz-warning-bg: rgba(255, 196, 0, 0.08);\n    --pz-warning-border: rgba(255, 196, 0, 0.25);\n    --pz-warning-text: #f3dc9a;\n    --pz-icon: #9a9ea8;\n    --pz-icon-disabled: #4a4d55;\n    --pz-ease: cubic-bezier(0.2, 0.7, 0.2, 1);\n    --pz-font: \"Inter\", \"MiSans\", \"HarmonyOS Sans SC\", \"PingFang SC\", \"Noto Sans CJK SC\",\n        \"Source Han Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif;\n\n    /* ppixiv's own variables */\n    --main-background-color: var(--pz-bg);\n    --background-noise: none;\n    --button-color: var(--pz-icon);\n    --button-highlight-color: var(--pz-text-strong);\n    --button-disabled-color: var(--pz-icon-disabled);\n    --input-outline: var(--pz-border-strong);\n    --input-outline-focused: var(--pz-accent);\n    --ui-bg-color: var(--pz-surface);\n    --ui-fg-color: var(--pz-text);\n    --ui-border-color: var(--pz-border);\n    --ui-bg-section-color: var(--pz-desc-bg);\n    --frame-bg-color: var(--pz-surface-strong);\n    --frame-fg-color: var(--pz-text);\n    --frame-border-color: var(--pz-border);\n    --dropdown-menu-hover-color: var(--pz-raise-hover);\n    --box-link-fg-color: var(--pz-text);\n    --box-link-bg-color: var(--pz-raise);\n    --box-link-disabled-color: var(--pz-text-3);\n    --box-link-hover-color: var(--pz-raise-hover);\n    --box-link-selected-color: var(--pz-accent-soft);\n    --box-link-selected-hover-color: var(--pz-accent-soft);\n    --minor-text-fg-color: var(--pz-text-2);\n    --title-fg-color: var(--pz-text);\n    --title-bg-color: transparent;\n    --like-button-color: var(--pz-icon);\n    --like-button-liked-color: #f5b700;\n    --like-button-hover-color: var(--pz-text-strong);\n}\n\nhtml.ppx-zh body,\nhtml.ppx-zh .title-font,\nhtml.ppx-zh .widget input,\nhtml.ppx-zh .widget textarea,\nhtml.ppx-zh .widget button {\n    font-family: var(--pz-font);\n}\n\nhtml.ppx-zh body {\n    color: var(--pz-text);\n    -webkit-font-smoothing: antialiased;\n    letter-spacing: 0.01em;\n}\n\nhtml.ppx-zh ::selection {\n    background: var(--pz-accent-soft);\n}\n\n/* ------------------------------------------------------------------ scrollbars */\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar,\nhtml.ppx-zh:not(.macos) .search-results::-webkit-scrollbar {\n    width: 10px;\n    height: 10px;\n    background-color: transparent;\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb {\n    background-color: var(--pz-scroll-thumb);\n    border: 3px solid transparent;\n    border-radius: 999px;\n    background-clip: padding-box;\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb:hover {\n    background-color: var(--pz-scroll-thumb-hover);\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-corner,\nhtml.ppx-zh:not(.macos) ::-webkit-resizer {\n    background: transparent;\n}\n\n/* ------------------------------------------------------------------ tooltips */\n\n@keyframes pz-tip-in {\n    from { opacity: 0; translate: 0 3px; }\n    to { opacity: 1; translate: 0 0; }\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup:hover::after {\n        background: var(--pz-tip-bg);\n        color: var(--pz-text);\n        border: 1px solid var(--pz-border-strong);\n        border-radius: 8px;\n        padding: 5px 10px;\n        font-size: 12.5px;\n        font-weight: 500;\n        line-height: 1.4;\n        letter-spacing: 0.02em;\n        text-shadow: none;\n        box-shadow: var(--pz-shadow-sm);\n        top: -2.4em;\n        animation: pz-tip-in 0.14s var(--pz-ease) both;\n    }\n\n    html.ppx-zh .popup.popup-bottom:hover::after {\n        top: auto;\n        bottom: -2.5em;\n    }\n}\n\n/* ------------------------------------------------------------------ icon buttons */\n\nhtml.ppx-zh .icon-button {\n    position: relative;\n    isolation: isolate;\n    transition: color 0.15s var(--pz-ease);\n}\n\nhtml.ppx-zh .icon-button::before {\n    content: \"\";\n    position: absolute;\n    inset: -4px;\n    z-index: -1;\n    border-radius: 10px;\n    background: transparent;\n    transition: background-color 0.15s var(--pz-ease), transform 0.15s var(--pz-ease);\n    transform: scale(0.85);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .icon-button:hover::before,\n    html.ppx-zh .popup-visible > .icon-button::before {\n        background: var(--pz-raise-hover);\n        transform: scale(1);\n    }\n}\n\nhtml.ppx-zh .icon-button.highlighted::before {\n    background: var(--pz-accent-soft);\n    transform: scale(1);\n}\n\nhtml.ppx-zh .button-row {\n    gap: calc(var(--icon-row-gap) + 6px);\n}\n\n/* The settings button turns yellow when ppixiv has a changelog entry.  Use a dot instead. */\nhtml.ppx-zh[data-whats-new-updated] .screen-search-container .thumbnail-ui-box .settings-menu-box {\n    --button-color: var(--pz-icon);\n}\n\nhtml.ppx-zh[data-whats-new-updated] .settings-menu-box .icon-button::after {\n    content: \"\";\n    position: absolute;\n    top: -2px;\n    right: -2px;\n    width: 7px;\n    height: 7px;\n    border-radius: 50%;\n    background: var(--pz-accent);\n    box-shadow: 0 0 0 2px var(--pz-bg);\n}\n\n/* ------------------------------------------------------------------ box links (pills) */\n\nhtml.ppx-zh .box-link {\n    border-radius: var(--pz-radius-sm);\n    transition: background-color 0.15s var(--pz-ease), color 0.15s var(--pz-ease), box-shadow 0.15s var(--pz-ease);\n    font-weight: 500;\n}\n\nhtml.ppx-zh .box-link.selected {\n    color: var(--pz-selected-text);\n    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);\n}\n\nhtml.ppx-zh .menu-dropdown-button.selected,\nhtml.ppx-zh .menu-dropdown-button {\n    box-shadow: none;\n}\n\nhtml.ppx-zh .box-link.disabled {\n    opacity: 0.55;\n}\n\nhtml.ppx-zh .box-button-row > .box-link {\n    margin: 0 0.18em;\n}\n\nhtml.ppx-zh .box-link .icon.with-text {\n    opacity: 0.8;\n}\n\n/* ------------------------------------------------------------------ inputs */\n\nhtml.ppx-zh .input-field-container {\n    outline: none;\n    border: 1px solid var(--pz-border-strong);\n    background: var(--pz-input-bg);\n    border-radius: var(--pz-radius-sm);\n    transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;\n}\n\nhtml.ppx-zh .input-field-container:focus-within {\n    outline: none;\n    border-color: var(--pz-accent);\n    background: var(--pz-input-bg-focus);\n    box-shadow: 0 0 0 3px var(--pz-accent-soft);\n}\n\nhtml.ppx-zh .input-field-container > input {\n    background: transparent;\n    color: var(--pz-text);\n    border: none;\n}\n\nhtml.ppx-zh .input-field-container > input::placeholder {\n    color: var(--pz-text-3);\n}\n\n/* ------------------------------------------------------------------ dropdowns and menus */\n\nhtml.ppx-zh .dropdown-box {\n    background: var(--pz-surface-strong);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: var(--pz-radius-md);\n    box-shadow: var(--pz-shadow);\n}\n\nhtml.ppx-zh .popup-menu-box {\n    padding: 6px;\n}\n\nhtml.ppx-zh .vertical-list > .box-link {\n    height: 2.15em;\n    border-radius: 8px;\n}\n\nhtml.ppx-zh .vertical-list .box-link-row {\n    gap: 0.25em;\n}\n\nhtml.ppx-zh .vertical-list .box-link-row > .box-link {\n    border-radius: 8px;\n}\n\nhtml.ppx-zh .follow-widget .separator {\n    height: 1px;\n    margin: 4px 6px;\n    background-color: var(--pz-border-strong);\n}\n\n/* ------------------------------------------------------------------ search page header */\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box {\n    background: var(--pz-surface);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border);\n    border-radius: 20px;\n    box-shadow: var(--pz-shadow);\n    padding: 14px 20px 14px;\n}\n\nhtml.ppx-zh .screen-search-container .search-desktop-ui {\n    padding-top: calc(max(14px, env(safe-area-inset-top)));\n    padding-bottom: 14px;\n}\n\nhtml.ppx-zh .screen-search-container .search-title {\n    font-size: 22px;\n    font-weight: 700;\n    letter-spacing: 0.02em;\n}\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box .button-row {\n    margin-top: 4px;\n}\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box .data-source-ui {\n    padding-top: 2px;\n}\n\n/* The discovery type filter sits on the same line as the age buttons. */\nhtml.ppx-zh .screen-search-container .data-source-ui > div:has(> .pz-discovery-type) {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: center;\n    gap: 0.5em 1.2em;\n}\n\nhtml.ppx-zh .title-with-button-row-container:hover .title-with-button-row {\n    background: transparent;\n}\n\nhtml.ppx-zh .avatar-widget .avatar,\nhtml.ppx-zh .screen-search-container .image-for-suggestions > img {\n    border-radius: 14px;\n}\n\n/* ------------------------------------------------------------------ thumbnails */\n\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link {\n    border-radius: 12px;\n    background: var(--pz-thumb-placeholder);\n    transition: box-shadow 0.2s var(--pz-ease), transform 0.2s var(--pz-ease);\n}\n\nhtml.ppx-zh:not(.mobile) .search-view .thumbnail-box a.thumbnail-link {\n    border-radius: 12px;\n}\n\n/* Hover ring.  Drawn inside the thumbnail, since rows use contain: strict and clip anything\n * outside them. */\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link {\n    position: relative;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link::after {\n    content: \"\";\n    position: absolute;\n    inset: 0;\n    border-radius: inherit;\n    pointer-events: none;\n    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.9), inset 0 0 0 3px rgba(0, 0, 0, 0.35);\n    opacity: 0;\n    transition: opacity 0.15s var(--pz-ease);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .search-view .thumbnail-box:hover a.thumbnail-link::after {\n        opacity: 1;\n    }\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row {\n    bottom: 6px;\n    padding: 0 6px;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .thumbnail-label,\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {\n    background: rgba(12, 13, 16, 0.62);\n    -webkit-backdrop-filter: blur(10px);\n    backdrop-filter: blur(10px);\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 999px;\n    font-size: 13px;\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {\n    padding: 0.2em 0.6em;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box:hover {\n    background: var(--pz-accent);\n    border-color: transparent;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box.expanded-thumb a.thumbnail-link {\n    border-bottom-color: var(--pz-accent);\n    border-bottom-width: 4px;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box.muted .muted-text .muted-label {\n    font-size: 13px;\n    font-weight: 600;\n    color: var(--pz-text-2);\n}\n\nhtml.ppx-zh .search-view > .no-results > .message {\n    background: var(--pz-surface);\n    border: 1px solid var(--pz-border);\n    border-radius: var(--pz-radius-md);\n    padding: 0.6em 1.2em;\n    color: var(--pz-text-2);\n}\n\n/* ------------------------------------------------------------------ toast messages */\n\nhtml.ppx-zh .hover-message > .message {\n    background: var(--pz-toast-bg);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: 14px;\n    box-shadow: var(--pz-shadow);\n    padding: 0.55em 1.1em;\n    font-size: 15px;\n    font-weight: 500;\n}\n\n/* ------------------------------------------------------------------ image info panel */\n\nhtml.ppx-zh .image-ui .ui-box {\n    background: var(--pz-surface);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border);\n    border-radius: 18px;\n    box-shadow: var(--pz-shadow);\n    padding: 14px 16px 16px;\n    top: 14px;\n    left: 14px;\n    min-width: min(500px, 90vw);\n    max-height: min(560px, 100vh - 28px);\n}\n\nhtml.ppx-zh .image-ui .ui-box .avatar-popup {\n    top: 14px;\n    right: 14px;\n    width: 3.6em;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block {\n    display: flex;\n    flex-direction: column;\n    gap: 2px;\n    padding: 0;\n    margin: 0 0 8px;\n    border-radius: 0;\n    line-height: 1.35;\n}\n\n/* Put the author on its own muted line instead of \"title by author\". */\nhtml.ppx-zh .image-ui .ui-box .title-block .author-block > span:first-child {\n    display: none;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .author {\n    vertical-align: baseline;\n}\n\n/* Keep the icon row clear of the avatar in the top right. */\nhtml.ppx-zh .image-ui .ui-box > .button-row {\n    padding-right: 4.2em;\n    gap: calc(var(--icon-row-gap) + 2px);\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .title {\n    font-size: 19px;\n    font-weight: 700;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .author {\n    color: var(--pz-text-2);\n    font-size: 15px;\n    font-weight: 600;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 6px;\n    margin: 2px 0 8px;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info > * {\n    background: var(--pz-raise);\n    color: var(--pz-text-2);\n    border-radius: 999px;\n    padding: 3px 10px;\n    font-size: 12px;\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info > [hidden] {\n    display: none !important;\n}\n\nhtml.ppx-zh .image-ui .ui-box .box-link.tag {\n    height: 1.9em;\n    font-size: 14px;\n    border-radius: 999px;\n    padding: 0 0.8em;\n    margin: 0 4px 6px 0;\n    background: var(--pz-raise);\n    color: var(--pz-tag-text);\n}\n\nhtml.ppx-zh .image-ui .ui-box .box-link.tag:hover {\n    background: var(--pz-accent-soft);\n}\n\nhtml.ppx-zh .image-ui .ui-box .description {\n    margin-top: 6px;\n    padding: 10px 12px;\n    border-radius: var(--pz-radius-md);\n    background: var(--pz-desc-bg);\n    color: var(--pz-desc-text);\n    line-height: 1.65;\n    font-size: 14px;\n}\n\nhtml.ppx-zh .image-ui .ui-box .description * {\n    color: inherit;\n}\n\nhtml.ppx-zh .image-ui .ui-box .description a {\n    color: var(--pz-accent-hover);\n}\n\n/* ------------------------------------------------------------------ context menu (hold right click) */\n\nhtml.ppx-zh .popup-context-menu {\n    --context-menu-bg-color: var(--pz-menu-bg);\n    color: var(--pz-text);\n    filter: drop-shadow(0 16px 32px var(--pz-menu-shadow));\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:first-child {\n    border-radius: 16px 0 0 16px;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:last-child {\n    border-radius: 0 16px 16px 0;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:only-child {\n    border-radius: 16px;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button {\n    background-color: var(--pz-menu-button);\n    color: var(--pz-menu-button-text);\n    border-radius: 11px;\n    transition: background-color 0.12s var(--pz-ease), color 0.12s var(--pz-ease);\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button:not(.enabled) {\n    color: var(--pz-menu-button-disabled-text);\n    background-color: var(--pz-menu-button-disabled);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup-context-menu .button-strip .button.enabled:hover {\n        background-color: var(--pz-menu-button-hover);\n        color: var(--pz-text-strong);\n    }\n}\n\n/* The like button is replaced with \"similar works\", which works whether or not the image was\n * liked.  ppixiv drops .enabled and adds .liked after a like, so style it the same either way. */\nhtml.ppx-zh .popup-context-menu .button-strip .button.pz-similar {\n    color: var(--pz-menu-button-text);\n    background-color: var(--pz-menu-button);\n}\n\nhtml.ppx-zh .popup-context-menu .button.button-like.pz-similar > svg {\n    color: inherit;\n    margin-top: 0;\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup-context-menu .button-strip .button.pz-similar:hover {\n        background-color: var(--pz-menu-button-hover);\n        color: var(--pz-text-strong);\n    }\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button.enabled.selected {\n    background-color: var(--pz-accent-soft);\n    color: var(--pz-selected-text);\n    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button .tag-dropdown-arrow {\n    border-top-color: var(--pz-menu-button);\n}\n\nhtml.ppx-zh .popup-context-menu .avatar-widget .avatar {\n    border-radius: 11px;\n}\n\nhtml.ppx-zh .popup-context-menu .context-menu-image-info {\n    color: var(--pz-text-2);\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .popup-context-menu .tooltip-display .tooltip-display-text {\n    background: var(--pz-tip-bg);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: 9px;\n    padding: 4px 10px;\n    font-size: 13.5px;\n    font-weight: 500;\n}\n\n/* ------------------------------------------------------------------ dialogs */\n\nhtml.ppx-zh .dialog {\n    border: 1px solid var(--pz-border);\n    box-shadow: var(--pz-shadow);\n}\n\nhtml.ppx-zh :has(> .dialog).floating > .dialog {\n    background: var(--pz-dialog-bg);\n    border-radius: 20px;\n}\n\nhtml.ppx-zh :has(> .dialog).floating {\n    -webkit-backdrop-filter: blur(6px);\n    backdrop-filter: blur(6px);\n}\n\nhtml.ppx-zh .dialog .header {\n    padding-bottom: 6px;\n}\n\nhtml.ppx-zh .dialog .header .header-text {\n    font-weight: 700;\n    letter-spacing: 0.03em;\n}\n\nhtml.ppx-zh .dialog .header .close-button-container .close-button {\n    border-radius: 10px;\n    transition: background-color 0.15s;\n}\n\nhtml.ppx-zh .dialog .header .close-button-container .close-button:hover {\n    background: var(--pz-raise-hover);\n}\n\n/* Settings: sidebar */\nhtml.ppx-zh .settings-dialog > .dialog > .scroll {\n    gap: 1.5em;\n}\n\nhtml.ppx-zh .settings-dialog .sections {\n    gap: 2px;\n    padding-right: 1.2em;\n    border-right: 1px solid var(--pz-border);\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link {\n    padding: 0.45em 0.8em;\n    height: auto;\n    border-radius: 10px;\n    font-size: 0.95em;\n    box-shadow: none;\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link:not(.selected) {\n    opacity: 1;\n    color: var(--pz-text-2);\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link.selected {\n    background: var(--pz-raise-active);\n    color: var(--pz-text-strong);\n    box-shadow: none;\n}\n\nhtml.ppx-zh[data-whats-new-updated] .settings-dialog .sections .settings-page-button[data-page='whatsNew'] {\n    color: var(--pz-accent-hover);\n}\n\n/* Settings: rows */\nhtml.ppx-zh .settings-list {\n    gap: 2px;\n}\n\nhtml.ppx-zh .settings-list > .box-link {\n    padding: 0.6em 0.8em;\n    border-radius: 12px;\n    box-shadow: none;\n}\n\nhtml.ppx-zh .settings-list > .box-link.clickable:hover,\nhtml.ppx-zh .settings-list > .box-link:has(.checkbox):hover {\n    background: var(--pz-raise);\n}\n\nhtml.ppx-zh .settings-list > .box-link > .explanation {\n    color: var(--pz-text-3);\n    font-size: 78%;\n    margin-top: 2px;\n    font-weight: 400;\n}\n\n/* Checkboxes become switches.  The script mirrors the icon state into data-pz-on. */\nhtml.ppx-zh .font-icon.checkbox {\n    font-size: 0 !important;\n    color: transparent !important;\n    flex: none;\n    position: relative;\n    width: 38px;\n    height: 22px;\n    border-radius: 999px;\n    background: var(--pz-switch-off);\n    transition: background-color 0.18s var(--pz-ease);\n    align-self: center;\n}\n\nhtml.ppx-zh .font-icon.checkbox::after {\n    content: \"\";\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #fff;\n    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);\n    transition: transform 0.18s var(--pz-ease);\n}\n\nhtml.ppx-zh .font-icon.checkbox[data-pz-on=\"1\"] {\n    background: var(--pz-accent);\n}\n\nhtml.ppx-zh .font-icon.checkbox[data-pz-on=\"1\"]::after {\n    transform: translateX(16px);\n}\n\n/* Sliders */\nhtml.ppx-zh .slider {\n    --track-height: 6px;\n    --thumb-height: 18px;\n    --on-color: var(--pz-accent);\n    --off-color: var(--pz-switch-off);\n}\n\nhtml.ppx-zh .slider:hover {\n    --on-color: var(--pz-accent-hover);\n}\n\nhtml.ppx-zh .slider .track-left {\n    border-radius: 999px 0 0 999px;\n}\n\nhtml.ppx-zh .slider .track-right {\n    border-radius: 0 999px 999px 0;\n}\n\nhtml.ppx-zh .slider .thumb {\n    background: #fff;\n    box-shadow: 0 0 0 4px var(--pz-accent-soft), 0 2px 6px rgba(0, 0, 0, 0.45);\n}\n\n/* Mutes */\nhtml.ppx-zh .muted-tags-popup .mute-warning {\n    background: var(--pz-warning-bg);\n    border: 1px solid var(--pz-warning-border);\n    color: var(--pz-warning-text);\n    border-radius: 12px;\n    padding: 10px 12px;\n    font-size: 0.85em;\n    line-height: 1.6;\n}\n\n/* ------------------------------------------------------------------ video controls */\n\nhtml.ppx-zh .video-ui > .video-ui-strip {\n    background: linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0));\n}\n\nhtml.ppx-zh .seek-bar > .seek-parts > [data-seek-part=\"fill\"] {\n    background-color: var(--pz-accent);\n}\n\nhtml.ppx-zh .seek-bar > .seek-parts > [data-seek-part=\"loaded\"] {\n    background-color: rgba(255, 255, 255, 0.35);\n}\n\n/* ------------------------------------------------------------------ light mode */\n\n/* The script adds pz-light to <html> when light mode is chosen, or when \"follow system\" is\n * chosen and the system is light. */\nhtml.ppx-zh.pz-light {\n    color-scheme: light;\n\n    --pz-bg: #f3f4f7;\n    --pz-bg-rgb: 243 244 247;\n    --pz-surface: rgba(255, 255, 255, 0.8);\n    --pz-surface-strong: rgba(255, 255, 255, 0.95);\n    --pz-surface-solid: #fff;\n    --pz-raise: rgba(20, 24, 34, 0.05);\n    --pz-raise-hover: rgba(20, 24, 34, 0.085);\n    --pz-raise-active: rgba(20, 24, 34, 0.11);\n    --pz-border: rgba(20, 24, 34, 0.09);\n    --pz-border-strong: rgba(20, 24, 34, 0.14);\n    --pz-text: #1c1e24;\n    --pz-text-2: #5c616c;\n    --pz-text-3: #8e939e;\n    --pz-text-strong: #0b0c0f;\n    --pz-accent: #0a84f0;\n    --pz-accent-hover: #0070d6;\n    --pz-accent-soft: rgba(10, 132, 240, 0.12);\n    --pz-accent-ring: rgba(10, 132, 240, 0.45);\n    --pz-selected-text: #005bb5;\n    --pz-tag-text: #0b62c4;\n    --pz-shadow: 0 18px 44px -14px rgba(20, 28, 45, 0.25), 0 3px 10px rgba(20, 28, 45, 0.08);\n    --pz-shadow-sm: 0 6px 16px -6px rgba(20, 28, 45, 0.22);\n    --pz-scroll-thumb: rgba(20, 24, 34, 0.18);\n    --pz-scroll-thumb-hover: rgba(20, 24, 34, 0.35);\n    --pz-tip-bg: rgba(255, 255, 255, 0.97);\n    --pz-toast-bg: rgba(255, 255, 255, 0.95);\n    --pz-input-bg: rgba(255, 255, 255, 0.75);\n    --pz-input-bg-focus: #fff;\n    --pz-thumb-placeholder: #e4e6ea;\n    --pz-desc-bg: rgba(20, 24, 34, 0.04);\n    --pz-desc-text: #3b3f48;\n    --pz-dialog-bg: rgba(255, 255, 255, 0.97);\n    --pz-switch-off: rgba(20, 24, 34, 0.18);\n    --pz-menu-bg: #fff;\n    --pz-menu-shadow: rgba(20, 28, 45, 0.24);\n    --pz-menu-button: rgba(20, 24, 34, 0.05);\n    --pz-menu-button-text: #4d525c;\n    --pz-menu-button-disabled: rgba(20, 24, 34, 0.025);\n    --pz-menu-button-disabled-text: #b9bdc5;\n    --pz-menu-button-hover: rgba(20, 24, 34, 0.1);\n    --pz-warning-bg: rgba(240, 170, 0, 0.1);\n    --pz-warning-border: rgba(200, 140, 0, 0.3);\n    --pz-warning-text: #7a5600;\n    --pz-icon: #6a6f7a;\n    --pz-icon-disabled: #c4c7cd;\n    --like-button-liked-color: #e0a100;\n\n    /* ppixiv sets an inline black background on <html> while it starts up. */\n    background-color: var(--pz-bg) !important;\n}\n\n/* Dim the page behind dialogs less. */\nhtml.ppx-zh.pz-light :has(> .dialog).floating {\n    background-color: rgba(20, 24, 34, calc(var(--dialog-visible, 1) * 0.28));\n}\n\nhtml.ppx-zh.pz-light .search-title .word.or,\nhtml.ppx-zh.pz-light .input-dropdown .search .word.or {\n    color: var(--pz-text-3);\n}\n\nhtml.ppx-zh.pz-light .years-ago > a {\n    background-color: var(--pz-raise);\n}\n\n/* ppixiv fades the search results behind the image view to black.  Keep its opacity formula,\n * which makes the layer fully transparent while the image view is hidden, and only change the\n * color. */\nhtml.ppx-zh.pz-light .screen-illust-container .fade-search {\n    background-color: rgb(var(--pz-bg-rgb) / calc(1 - (var(--illust-hidden) - 0.1) / 0.9));\n}\n\n/* Bookmark and like counts are outlined so they read over icons.  Use a light outline. */\nhtml.ppx-zh.pz-light {\n    --minor-text-shadow-color: rgba(255, 255, 255, 0.95);\n}\n\n/* ------------------------------------------------------------------ appearance button */\n\nhtml.ppx-zh .pz-theme-button svg {\n    display: block;\n    width: 100%;\n    height: 100%;\n}\n";
+// Tag filter buttons show the selected entry's label, which is the user's tag once one is
+// picked.  Only ppixiv's own labels are translated there.
+const TAG_BUTTON_LABEL_SELECTOR = [
+    ".bookmark-tag-button .label", ".follow-tag-button .label", ".follow-tags-button .label",
+    ".member-tags-button .label",
+].join(",");
+const TAG_BUTTON_LABELS = new Set(["All bookmarks", "Untagged", "All tags", "Tags", "All", "Other"]);
+
+const THEME_CSS = "/* Modern theme for ppixiv.  Every rule is scoped to html.ppx-zh, which the script only sets\n * while ppixiv is running, so Pixiv's own pages are never restyled. */\n\nhtml.ppx-zh {\n    --pz-bg: #0c0d10;\n    --pz-surface: rgba(22, 23, 28, 0.78);\n    --pz-surface-strong: rgba(20, 21, 26, 0.92);\n    --pz-surface-solid: #16171c;\n    --pz-raise: rgba(255, 255, 255, 0.055);\n    --pz-raise-hover: rgba(255, 255, 255, 0.1);\n    --pz-raise-active: rgba(255, 255, 255, 0.14);\n    --pz-border: rgba(255, 255, 255, 0.08);\n    --pz-border-strong: rgba(255, 255, 255, 0.14);\n    --pz-text: #eceef2;\n    --pz-text-2: #a6aab4;\n    --pz-text-3: #6d717c;\n    --pz-accent: #3a9dff;\n    --pz-accent-hover: #5cb0ff;\n    --pz-accent-soft: rgba(58, 157, 255, 0.18);\n    --pz-accent-ring: rgba(58, 157, 255, 0.45);\n    --pz-heart: #ff4060;\n    --pz-radius: 16px;\n    --pz-radius-md: 12px;\n    --pz-radius-sm: 9px;\n    --pz-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.7), 0 4px 14px rgba(0, 0, 0, 0.35);\n    --pz-shadow-sm: 0 6px 18px -6px rgba(0, 0, 0, 0.6);\n    --pz-blur: blur(22px) saturate(150%);\n    --pz-text-strong: #fff;\n    --pz-selected-text: #d8ebff;\n    --pz-tag-text: #cfe3ff;\n    --pz-scroll-thumb: rgba(255, 255, 255, 0.14);\n    --pz-scroll-thumb-hover: rgba(255, 255, 255, 0.3);\n    --pz-tip-bg: rgba(14, 15, 19, 0.94);\n    --pz-toast-bg: rgba(18, 19, 24, 0.9);\n    --pz-input-bg: rgba(255, 255, 255, 0.04);\n    --pz-input-bg-focus: rgba(255, 255, 255, 0.06);\n    --pz-thumb-placeholder: #15161a;\n    --pz-desc-bg: rgba(255, 255, 255, 0.04);\n    --pz-desc-text: #c9ccd3;\n    --pz-dialog-bg: rgba(18, 19, 24, 0.96);\n    --pz-switch-off: rgba(255, 255, 255, 0.16);\n    --pz-menu-bg: #17181d;\n    --pz-menu-shadow: rgba(0, 0, 0, 0.55);\n    --pz-menu-button: rgba(255, 255, 255, 0.06);\n    --pz-menu-button-text: #a9adb6;\n    --pz-menu-button-disabled: rgba(255, 255, 255, 0.03);\n    --pz-menu-button-disabled-text: #4f525a;\n    --pz-menu-button-hover: rgba(255, 255, 255, 0.16);\n    --pz-warning-bg: rgba(255, 196, 0, 0.08);\n    --pz-warning-border: rgba(255, 196, 0, 0.25);\n    --pz-warning-text: #f3dc9a;\n    --pz-icon: #9a9ea8;\n    --pz-icon-disabled: #4a4d55;\n    --pz-ease: cubic-bezier(0.2, 0.7, 0.2, 1);\n    --pz-font: \"Inter\", \"MiSans\", \"HarmonyOS Sans SC\", \"PingFang SC\", \"Noto Sans CJK SC\",\n        \"Source Han Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif;\n\n    /* ppixiv's own variables */\n    --main-background-color: var(--pz-bg);\n    --background-noise: none;\n    --button-color: var(--pz-icon);\n    --button-highlight-color: var(--pz-text-strong);\n    --button-disabled-color: var(--pz-icon-disabled);\n    --input-outline: var(--pz-border-strong);\n    --input-outline-focused: var(--pz-accent);\n    --ui-bg-color: var(--pz-surface);\n    --ui-fg-color: var(--pz-text);\n    --ui-border-color: var(--pz-border);\n    --ui-bg-section-color: var(--pz-desc-bg);\n    --frame-bg-color: var(--pz-surface-strong);\n    --frame-fg-color: var(--pz-text);\n    --frame-border-color: var(--pz-border);\n    --dropdown-menu-hover-color: var(--pz-raise-hover);\n    --box-link-fg-color: var(--pz-text);\n    --box-link-bg-color: var(--pz-raise);\n    --box-link-disabled-color: var(--pz-text-3);\n    --box-link-hover-color: var(--pz-raise-hover);\n    --box-link-selected-color: var(--pz-accent-soft);\n    --box-link-selected-hover-color: var(--pz-accent-soft);\n    --minor-text-fg-color: var(--pz-text-2);\n    --title-fg-color: var(--pz-text);\n    --title-bg-color: transparent;\n    --like-button-color: var(--pz-icon);\n    --like-button-liked-color: #f5b700;\n    --like-button-hover-color: var(--pz-text-strong);\n}\n\nhtml.ppx-zh body,\nhtml.ppx-zh .title-font,\nhtml.ppx-zh .widget input,\nhtml.ppx-zh .widget textarea,\nhtml.ppx-zh .widget button {\n    font-family: var(--pz-font);\n}\n\nhtml.ppx-zh body {\n    color: var(--pz-text);\n    -webkit-font-smoothing: antialiased;\n    letter-spacing: 0.01em;\n}\n\nhtml.ppx-zh ::selection {\n    background: var(--pz-accent-soft);\n}\n\n/* ------------------------------------------------------------------ scrollbars */\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar,\nhtml.ppx-zh:not(.macos) .search-results::-webkit-scrollbar {\n    width: 10px;\n    height: 10px;\n    background-color: transparent;\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb {\n    background-color: var(--pz-scroll-thumb);\n    border: 3px solid transparent;\n    border-radius: 999px;\n    background-clip: padding-box;\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-thumb:hover {\n    background-color: var(--pz-scroll-thumb-hover);\n}\n\nhtml.ppx-zh:not(.macos) ::-webkit-scrollbar-corner,\nhtml.ppx-zh:not(.macos) ::-webkit-resizer {\n    background: transparent;\n}\n\n/* ------------------------------------------------------------------ tooltips */\n\n@keyframes pz-tip-in {\n    from { opacity: 0; translate: 0 3px; }\n    to { opacity: 1; translate: 0 0; }\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup:hover::after {\n        background: var(--pz-tip-bg);\n        color: var(--pz-text);\n        border: 1px solid var(--pz-border-strong);\n        border-radius: 8px;\n        padding: 5px 10px;\n        font-size: 12.5px;\n        font-weight: 500;\n        line-height: 1.4;\n        letter-spacing: 0.02em;\n        text-shadow: none;\n        box-shadow: var(--pz-shadow-sm);\n        top: -2.4em;\n        animation: pz-tip-in 0.14s var(--pz-ease) both;\n    }\n\n    html.ppx-zh .popup.popup-bottom:hover::after {\n        top: auto;\n        bottom: -2.5em;\n    }\n}\n\n/* ------------------------------------------------------------------ icon buttons */\n\nhtml.ppx-zh .icon-button {\n    position: relative;\n    isolation: isolate;\n    transition: color 0.15s var(--pz-ease);\n}\n\nhtml.ppx-zh .icon-button::before {\n    content: \"\";\n    position: absolute;\n    inset: -4px;\n    z-index: -1;\n    border-radius: 10px;\n    background: transparent;\n    transition: background-color 0.15s var(--pz-ease), transform 0.15s var(--pz-ease);\n    transform: scale(0.85);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .icon-button:hover::before {\n        background: var(--pz-raise-hover);\n        transform: scale(1);\n    }\n}\n\nhtml.ppx-zh .icon-button.highlighted::before {\n    background: var(--pz-accent-soft);\n    transform: scale(1);\n}\n\nhtml.ppx-zh .button-row {\n    gap: calc(var(--icon-row-gap) + 6px);\n}\n\n/* The settings button turns yellow when ppixiv has a changelog entry.  Use a dot instead. */\nhtml.ppx-zh[data-whats-new-updated] .screen-search-container .thumbnail-ui-box .settings-menu-box {\n    --button-color: var(--pz-icon);\n}\n\nhtml.ppx-zh[data-whats-new-updated] .settings-menu-box .icon-button::after {\n    content: \"\";\n    position: absolute;\n    top: -2px;\n    right: -2px;\n    width: 7px;\n    height: 7px;\n    border-radius: 50%;\n    background: var(--pz-accent);\n    box-shadow: 0 0 0 2px var(--pz-bg);\n}\n\n/* ------------------------------------------------------------------ box links (pills) */\n\nhtml.ppx-zh .box-link {\n    border-radius: var(--pz-radius-sm);\n    transition: background-color 0.15s var(--pz-ease), color 0.15s var(--pz-ease), box-shadow 0.15s var(--pz-ease);\n    font-weight: 500;\n}\n\nhtml.ppx-zh .box-link.selected {\n    color: var(--pz-selected-text);\n    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);\n}\n\nhtml.ppx-zh .menu-dropdown-button.selected,\nhtml.ppx-zh .menu-dropdown-button {\n    box-shadow: none;\n}\n\nhtml.ppx-zh .box-link.disabled {\n    opacity: 0.55;\n}\n\nhtml.ppx-zh .box-button-row > .box-link {\n    margin: 0 0.18em;\n}\n\nhtml.ppx-zh .box-link .icon.with-text {\n    opacity: 0.8;\n}\n\n/* ------------------------------------------------------------------ inputs */\n\nhtml.ppx-zh .input-field-container {\n    outline: none;\n    border: 1px solid var(--pz-border-strong);\n    background: var(--pz-input-bg);\n    border-radius: var(--pz-radius-sm);\n    transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;\n}\n\nhtml.ppx-zh .input-field-container:focus-within {\n    outline: none;\n    border-color: var(--pz-accent);\n    background: var(--pz-input-bg-focus);\n    box-shadow: 0 0 0 3px var(--pz-accent-soft);\n}\n\nhtml.ppx-zh .input-field-container > input {\n    background: transparent;\n    color: var(--pz-text);\n    border: none;\n}\n\nhtml.ppx-zh .input-field-container > input::placeholder {\n    color: var(--pz-text-3);\n}\n\n/* ------------------------------------------------------------------ dropdowns and menus */\n\nhtml.ppx-zh .dropdown-box {\n    background: var(--pz-surface-strong);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: var(--pz-radius-md);\n    box-shadow: var(--pz-shadow);\n}\n\nhtml.ppx-zh .popup-menu-box {\n    padding: 6px;\n}\n\nhtml.ppx-zh .vertical-list > .box-link {\n    height: 2.15em;\n    border-radius: 8px;\n}\n\nhtml.ppx-zh .vertical-list .box-link-row {\n    gap: 0.25em;\n}\n\nhtml.ppx-zh .vertical-list .box-link-row > .box-link {\n    border-radius: 8px;\n}\n\nhtml.ppx-zh .follow-widget .separator {\n    height: 1px;\n    margin: 4px 6px;\n    background-color: var(--pz-border-strong);\n}\n\n/* ------------------------------------------------------------------ search page header */\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box {\n    background: var(--pz-surface);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border);\n    border-radius: 20px;\n    box-shadow: var(--pz-shadow);\n    padding: 14px 20px 14px;\n}\n\nhtml.ppx-zh .screen-search-container .search-desktop-ui {\n    padding-top: calc(max(14px, env(safe-area-inset-top)));\n    padding-bottom: 14px;\n}\n\nhtml.ppx-zh .screen-search-container .search-title {\n    font-size: 22px;\n    font-weight: 700;\n    letter-spacing: 0.02em;\n}\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box .button-row {\n    margin-top: 4px;\n}\n\nhtml.ppx-zh .screen-search-container .thumbnail-ui-box .data-source-ui {\n    padding-top: 2px;\n}\n\n/* The discovery type filter sits on the same line as the age buttons. */\nhtml.ppx-zh .screen-search-container .data-source-ui > div:has(> .pz-discovery-type) {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: center;\n    gap: 0.5em 1.2em;\n}\n\nhtml.ppx-zh .title-with-button-row-container:hover .title-with-button-row {\n    background: transparent;\n}\n\nhtml.ppx-zh .avatar-widget .avatar,\nhtml.ppx-zh .screen-search-container .image-for-suggestions > img {\n    border-radius: 14px;\n}\n\n/* ------------------------------------------------------------------ thumbnails */\n\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link {\n    border-radius: 12px;\n    background: var(--pz-thumb-placeholder);\n    transition: box-shadow 0.2s var(--pz-ease), transform 0.2s var(--pz-ease);\n}\n\nhtml.ppx-zh:not(.mobile) .search-view .thumbnail-box a.thumbnail-link {\n    border-radius: 12px;\n}\n\n/* Hover ring.  Drawn inside the thumbnail, since rows use contain: strict and clip anything\n * outside them. */\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link {\n    position: relative;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box a.thumbnail-link::after {\n    content: \"\";\n    position: absolute;\n    inset: 0;\n    border-radius: inherit;\n    pointer-events: none;\n    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.9), inset 0 0 0 3px rgba(0, 0, 0, 0.35);\n    opacity: 0;\n    transition: opacity 0.15s var(--pz-ease);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .search-view .thumbnail-box:hover a.thumbnail-link::after {\n        opacity: 1;\n    }\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row {\n    bottom: 6px;\n    padding: 0 6px;\n}\n\n/* These sit on the image in both themes, so their text stays light. */\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .thumbnail-label,\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {\n    color: #fff;\n    background: rgba(12, 13, 16, 0.62);\n    -webkit-backdrop-filter: blur(10px);\n    backdrop-filter: blur(10px);\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 999px;\n    font-size: 13px;\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {\n    padding: 0.2em 0.6em;\n}\n\nhtml.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box:hover {\n    background: var(--pz-accent);\n    border-color: transparent;\n}\n\n/* ppixiv gives each expanded post its own underline color inline, to tell neighboring posts\n * apart. */\nhtml.ppx-zh .search-view .thumbnail-box.expanded-thumb a.thumbnail-link {\n    border-bottom-width: 4px;\n}\n\n/* On the darkened image in both themes. */\nhtml.ppx-zh .search-view .thumbnail-box.muted .muted-text .muted-label {\n    font-size: 13px;\n    font-weight: 600;\n    color: rgba(255, 255, 255, 0.75);\n}\n\nhtml.ppx-zh .search-view > .no-results > .message {\n    background: var(--pz-surface);\n    border: 1px solid var(--pz-border);\n    border-radius: var(--pz-radius-md);\n    padding: 0.6em 1.2em;\n    color: var(--pz-text-2);\n}\n\n/* ------------------------------------------------------------------ toast messages */\n\nhtml.ppx-zh .hover-message > .message {\n    background: var(--pz-toast-bg);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: 14px;\n    box-shadow: var(--pz-shadow);\n    padding: 0.55em 1.1em;\n    font-size: 15px;\n    font-weight: 500;\n}\n\n/* ------------------------------------------------------------------ image info panel */\n\nhtml.ppx-zh .image-ui .ui-box {\n    background: var(--pz-surface);\n    -webkit-backdrop-filter: var(--pz-blur);\n    backdrop-filter: var(--pz-blur);\n    border: 1px solid var(--pz-border);\n    border-radius: 18px;\n    box-shadow: var(--pz-shadow);\n    padding: 14px 16px 16px;\n    top: 14px;\n    left: 14px;\n    min-width: min(500px, 90vw);\n    max-height: min(560px, 100vh - 28px);\n}\n\nhtml.ppx-zh .image-ui .ui-box .avatar-popup {\n    top: 14px;\n    right: 14px;\n    width: 3.6em;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block {\n    display: flex;\n    flex-direction: column;\n    gap: 2px;\n    padding: 0;\n    margin: 0 0 8px;\n    border-radius: 0;\n    line-height: 1.35;\n}\n\n/* Put the author on its own muted line instead of \"title by author\". */\nhtml.ppx-zh .image-ui .ui-box .title-block .author-block > span:first-child {\n    display: none;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .author {\n    vertical-align: baseline;\n}\n\n/* Keep the icon row clear of the avatar in the top right. */\nhtml.ppx-zh .image-ui .ui-box > .button-row {\n    padding-right: 4.2em;\n    gap: calc(var(--icon-row-gap) + 2px);\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .title {\n    font-size: 19px;\n    font-weight: 700;\n}\n\nhtml.ppx-zh .image-ui .ui-box .title-block .author {\n    color: var(--pz-text-2);\n    font-size: 15px;\n    font-weight: 600;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 6px;\n    margin: 2px 0 8px;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info > * {\n    background: var(--pz-raise);\n    color: var(--pz-text-2);\n    border-radius: 999px;\n    padding: 3px 10px;\n    font-size: 12px;\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .image-ui .ui-box .post-info > [hidden] {\n    display: none !important;\n}\n\nhtml.ppx-zh .image-ui .ui-box .box-link.tag {\n    height: 1.9em;\n    font-size: 14px;\n    border-radius: 999px;\n    padding: 0 0.8em;\n    margin: 0 4px 6px 0;\n    background: var(--pz-raise);\n    color: var(--pz-tag-text);\n}\n\nhtml.ppx-zh .image-ui .ui-box .box-link.tag:hover {\n    background: var(--pz-accent-soft);\n}\n\nhtml.ppx-zh .image-ui .ui-box .description {\n    margin-top: 6px;\n    padding: 10px 12px;\n    border-radius: var(--pz-radius-md);\n    background: var(--pz-desc-bg);\n    color: var(--pz-desc-text);\n    line-height: 1.65;\n    font-size: 14px;\n}\n\nhtml.ppx-zh .image-ui .ui-box .description * {\n    color: inherit;\n}\n\nhtml.ppx-zh .image-ui .ui-box .description a {\n    color: var(--pz-accent-hover);\n}\n\n/* ------------------------------------------------------------------ context menu (hold right click) */\n\nhtml.ppx-zh .popup-context-menu {\n    --context-menu-bg-color: var(--pz-menu-bg);\n    color: var(--pz-text);\n    filter: drop-shadow(0 16px 32px var(--pz-menu-shadow));\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:first-child {\n    border-radius: 16px 0 0 16px;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:last-child {\n    border-radius: 0 16px 16px 0;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip > .button-block:only-child {\n    border-radius: 16px;\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button {\n    background-color: var(--pz-menu-button);\n    color: var(--pz-menu-button-text);\n    border-radius: 11px;\n    transition: background-color 0.12s var(--pz-ease), color 0.12s var(--pz-ease);\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button:not(.enabled) {\n    color: var(--pz-menu-button-disabled-text);\n    background-color: var(--pz-menu-button-disabled);\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup-context-menu .button-strip .button.enabled:hover {\n        background-color: var(--pz-menu-button-hover);\n        color: var(--pz-text-strong);\n    }\n}\n\n/* The like button is replaced with \"similar works\", which works whether or not the image was\n * liked.  ppixiv drops .enabled and adds .liked after a like, so style it the same either way. */\nhtml.ppx-zh .popup-context-menu .button-strip .button.pz-similar {\n    color: var(--pz-menu-button-text);\n    background-color: var(--pz-menu-button);\n}\n\nhtml.ppx-zh .popup-context-menu .button.button-like.pz-similar > svg {\n    color: inherit;\n    margin-top: 0;\n}\n\n@media (hover: hover) {\n    html.ppx-zh .popup-context-menu .button-strip .button.pz-similar:hover {\n        background-color: var(--pz-menu-button-hover);\n        color: var(--pz-text-strong);\n    }\n}\n\nhtml.ppx-zh .popup-context-menu .button-strip .button.enabled.selected {\n    background-color: var(--pz-accent-soft);\n    color: var(--pz-selected-text);\n    box-shadow: inset 0 0 0 1px var(--pz-accent-ring);\n}\n\nhtml.ppx-zh .popup-context-menu .avatar-widget .avatar {\n    border-radius: 11px;\n}\n\nhtml.ppx-zh .popup-context-menu .context-menu-image-info {\n    color: var(--pz-text-2);\n    font-weight: 600;\n    font-variant-numeric: tabular-nums;\n}\n\nhtml.ppx-zh .popup-context-menu .tooltip-display .tooltip-display-text {\n    background: var(--pz-tip-bg);\n    border: 1px solid var(--pz-border-strong);\n    border-radius: 9px;\n    padding: 4px 10px;\n    font-size: 13.5px;\n    font-weight: 500;\n}\n\n/* ------------------------------------------------------------------ dialogs */\n\nhtml.ppx-zh .dialog {\n    border: 1px solid var(--pz-border);\n    box-shadow: var(--pz-shadow);\n}\n\n/* ppixiv shows dialogs as full-width sheets, without .floating, when the window is under 500px\n * in either direction, as on phones.  Those keep ppixiv's own top-only rounding. */\nhtml.ppx-zh :has(> .dialog) > .dialog {\n    background: var(--pz-dialog-bg);\n}\n\nhtml.ppx-zh :has(> .dialog).floating > .dialog {\n    border-radius: 20px;\n}\n\nhtml.ppx-zh :has(> .dialog).floating {\n    -webkit-backdrop-filter: blur(6px);\n    backdrop-filter: blur(6px);\n}\n\nhtml.ppx-zh .dialog .header {\n    padding-bottom: 6px;\n}\n\nhtml.ppx-zh .dialog .header .header-text {\n    font-weight: 700;\n    letter-spacing: 0.03em;\n}\n\nhtml.ppx-zh .dialog .header .close-button-container .close-button {\n    border-radius: 10px;\n    transition: background-color 0.15s;\n}\n\nhtml.ppx-zh .dialog .header .close-button-container .close-button:hover {\n    background: var(--pz-raise-hover);\n}\n\n/* Settings: sidebar */\nhtml.ppx-zh .settings-dialog > .dialog > .scroll {\n    gap: 1.5em;\n}\n\nhtml.ppx-zh .settings-dialog .sections {\n    gap: 2px;\n    padding-right: 1.2em;\n    border-right: 1px solid var(--pz-border);\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link {\n    padding: 0.45em 0.8em;\n    height: auto;\n    border-radius: 10px;\n    font-size: 0.95em;\n    box-shadow: none;\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link:not(.selected) {\n    opacity: 1;\n    color: var(--pz-text-2);\n}\n\nhtml.ppx-zh .settings-dialog .sections > .box-link.selected {\n    background: var(--pz-raise-active);\n    color: var(--pz-text-strong);\n    box-shadow: none;\n}\n\nhtml.ppx-zh[data-whats-new-updated] .settings-dialog .sections .settings-page-button[data-page='whatsNew'] {\n    color: var(--pz-accent-hover);\n}\n\n/* Settings: rows */\nhtml.ppx-zh .settings-list {\n    gap: 2px;\n}\n\nhtml.ppx-zh .settings-list > .box-link {\n    padding: 0.6em 0.8em;\n    border-radius: 12px;\n    box-shadow: none;\n}\n\nhtml.ppx-zh .settings-list > .box-link.clickable:hover,\nhtml.ppx-zh .settings-list > .box-link:has(.checkbox):hover {\n    background: var(--pz-raise);\n}\n\nhtml.ppx-zh .settings-list > .box-link > .explanation {\n    color: var(--pz-text-3);\n    font-size: 78%;\n    margin-top: 2px;\n    font-weight: 400;\n}\n\n/* Checkboxes become switches.  The script mirrors the icon state into data-pz-on. */\nhtml.ppx-zh .font-icon.checkbox {\n    font-size: 0 !important;\n    color: transparent !important;\n    flex: none;\n    position: relative;\n    width: 38px;\n    height: 22px;\n    border-radius: 999px;\n    background: var(--pz-switch-off);\n    transition: background-color 0.18s var(--pz-ease);\n    align-self: center;\n}\n\nhtml.ppx-zh .font-icon.checkbox::after {\n    content: \"\";\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #fff;\n    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);\n    transition: transform 0.18s var(--pz-ease);\n}\n\nhtml.ppx-zh .font-icon.checkbox[data-pz-on=\"1\"] {\n    background: var(--pz-accent);\n}\n\nhtml.ppx-zh .font-icon.checkbox[data-pz-on=\"1\"]::after {\n    transform: translateX(16px);\n}\n\n/* Sliders */\nhtml.ppx-zh .slider {\n    --track-height: 6px;\n    --thumb-height: 18px;\n    --on-color: var(--pz-accent);\n    --off-color: var(--pz-switch-off);\n}\n\nhtml.ppx-zh .slider:hover {\n    --on-color: var(--pz-accent-hover);\n}\n\nhtml.ppx-zh .slider .track-left {\n    border-radius: 999px 0 0 999px;\n}\n\nhtml.ppx-zh .slider .track-right {\n    border-radius: 0 999px 999px 0;\n}\n\nhtml.ppx-zh .slider .thumb {\n    background: #fff;\n    box-shadow: 0 0 0 4px var(--pz-accent-soft), 0 2px 6px rgba(0, 0, 0, 0.45);\n}\n\n/* Mutes */\nhtml.ppx-zh .muted-tags-popup .mute-warning {\n    background: var(--pz-warning-bg);\n    border: 1px solid var(--pz-warning-border);\n    color: var(--pz-warning-text);\n    border-radius: 12px;\n    padding: 10px 12px;\n    font-size: 0.85em;\n    line-height: 1.6;\n}\n\n/* ------------------------------------------------------------------ image editor */\n\n/* The editor's buttons sit straight on the image.  ppixiv gives them a black background, and\n * the theme's translucent button colors would leave them unreadable over a bright or dark image,\n * so every state gets an opaque color here. */\nhtml.ppx-zh .image-editor {\n    --box-link-bg-color: var(--pz-surface-solid);\n    --box-link-hover-color: color-mix(in srgb, var(--pz-text) 12%, var(--pz-surface-solid));\n    --box-link-selected-color: color-mix(in srgb, var(--pz-accent) 22%, var(--pz-surface-solid));\n    --box-link-selected-hover-color: color-mix(in srgb, var(--pz-accent) 30%, var(--pz-surface-solid));\n}\n\n/* ------------------------------------------------------------------ video controls */\n\n/* The controls fill the strip, so it can't fade out completely without losing contrast at the\n * top.  ppixiv's own strip is rgba(0, 0, 0, 0.5). */\nhtml.ppx-zh .video-ui > .video-ui-strip {\n    background: linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.5));\n}\n\nhtml.ppx-zh .seek-bar > .seek-parts > [data-seek-part=\"fill\"] {\n    background-color: var(--pz-accent);\n}\n\nhtml.ppx-zh .seek-bar > .seek-parts > [data-seek-part=\"loaded\"] {\n    background-color: rgba(255, 255, 255, 0.35);\n}\n\n/* ------------------------------------------------------------------ light mode */\n\n/* The script adds pz-light to <html> when light mode is chosen, or when \"follow system\" is\n * chosen and the system is light. */\nhtml.ppx-zh.pz-light {\n    color-scheme: light;\n\n    --pz-bg: #f3f4f7;\n    --pz-bg-rgb: 243 244 247;\n    --pz-surface: rgba(255, 255, 255, 0.8);\n    --pz-surface-strong: rgba(255, 255, 255, 0.95);\n    --pz-surface-solid: #fff;\n    --pz-raise: rgba(20, 24, 34, 0.05);\n    --pz-raise-hover: rgba(20, 24, 34, 0.085);\n    --pz-raise-active: rgba(20, 24, 34, 0.11);\n    --pz-border: rgba(20, 24, 34, 0.09);\n    --pz-border-strong: rgba(20, 24, 34, 0.14);\n    --pz-text: #1c1e24;\n    --pz-text-2: #5c616c;\n    --pz-text-3: #8e939e;\n    --pz-text-strong: #0b0c0f;\n    --pz-accent: #0a84f0;\n    --pz-accent-hover: #0070d6;\n    --pz-accent-soft: rgba(10, 132, 240, 0.12);\n    --pz-accent-ring: rgba(10, 132, 240, 0.45);\n    --pz-selected-text: #005bb5;\n    --pz-tag-text: #0b62c4;\n    --pz-shadow: 0 18px 44px -14px rgba(20, 28, 45, 0.25), 0 3px 10px rgba(20, 28, 45, 0.08);\n    --pz-shadow-sm: 0 6px 16px -6px rgba(20, 28, 45, 0.22);\n    --pz-scroll-thumb: rgba(20, 24, 34, 0.18);\n    --pz-scroll-thumb-hover: rgba(20, 24, 34, 0.35);\n    --pz-tip-bg: rgba(255, 255, 255, 0.97);\n    --pz-toast-bg: rgba(255, 255, 255, 0.95);\n    --pz-input-bg: rgba(255, 255, 255, 0.75);\n    --pz-input-bg-focus: #fff;\n    --pz-thumb-placeholder: #e4e6ea;\n    --pz-desc-bg: rgba(20, 24, 34, 0.04);\n    --pz-desc-text: #3b3f48;\n    --pz-dialog-bg: rgba(255, 255, 255, 0.97);\n    --pz-switch-off: rgba(20, 24, 34, 0.18);\n    --pz-menu-bg: #fff;\n    --pz-menu-shadow: rgba(20, 28, 45, 0.24);\n    --pz-menu-button: rgba(20, 24, 34, 0.05);\n    --pz-menu-button-text: #4d525c;\n    --pz-menu-button-disabled: rgba(20, 24, 34, 0.025);\n    --pz-menu-button-disabled-text: #b9bdc5;\n    --pz-menu-button-hover: rgba(20, 24, 34, 0.1);\n    --pz-warning-bg: rgba(240, 170, 0, 0.1);\n    --pz-warning-border: rgba(200, 140, 0, 0.3);\n    --pz-warning-text: #7a5600;\n    --pz-icon: #6a6f7a;\n    --pz-icon-disabled: #c4c7cd;\n    --like-button-liked-color: #e0a100;\n\n    /* ppixiv sets an inline black background on <html> while it starts up. */\n    background-color: var(--pz-bg) !important;\n}\n\n/* Dim the page behind dialogs less. */\nhtml.ppx-zh.pz-light :has(> .dialog) {\n    background-color: rgba(20, 24, 34, calc(var(--dialog-visible, 1) * 0.28));\n}\n\nhtml.ppx-zh.pz-light .search-title .word.or,\nhtml.ppx-zh.pz-light .input-dropdown .search .word.or {\n    color: var(--pz-text-3);\n}\n\nhtml.ppx-zh.pz-light .years-ago > a {\n    background-color: var(--pz-raise);\n}\n\n/* Section headers in the tag search dropdown (\"Recent tags\", saved groups).  ppixiv draws them\n * navy with inherited text color.  They're sticky, so the background has to stay opaque. */\nhtml.ppx-zh.pz-light .input-dropdown .tag-section {\n    background-color: #e9edf4;\n    color: var(--pz-text-2);\n}\n\nhtml.ppx-zh.pz-light .input-dropdown :is(.edit-button, .group-suggestions-button) {\n    border-color: var(--pz-border-strong);\n}\n\n@media (hover: hover) {\n    html.ppx-zh.pz-light .input-dropdown :is(.edit-button, .group-suggestions-button):hover {\n        border-color: var(--pz-text-3);\n    }\n}\n\n/* Other colors ppixiv hard-codes for its dark background: the non-premium warning icon in the\n * mute settings, already-muted tags in the \"Edit mutes\" dialog, and the text prompt's submit\n * button. */\nhtml.ppx-zh.pz-light .non-premium-mute-warning .icon {\n    color: var(--pz-warning-text);\n}\n\nhtml.ppx-zh.pz-light .post-mute-list .entry.muted .tag-name {\n    color: #c0392b;\n}\n\nhtml.ppx-zh.pz-light .text-entry-popup .input-box > .submit-button {\n    border-color: var(--pz-border-strong);\n}\n\n@media (hover: hover) {\n    html.ppx-zh.pz-light .text-entry-popup .input-box > .submit-button:hover {\n        background-color: var(--pz-raise-hover);\n    }\n}\n\n/* ppixiv fades the search results behind the image view to black.  Keep its opacity formula,\n * which makes the layer fully transparent while the image view is hidden, and only change the\n * color. */\nhtml.ppx-zh.pz-light .screen-illust-container .fade-search {\n    background-color: rgb(var(--pz-bg-rgb) / calc(1 - (var(--illust-hidden) - 0.1) / 0.9));\n}\n\n/* Bookmark and like counts are outlined so they read over icons.  Use a light outline. */\nhtml.ppx-zh.pz-light {\n    --minor-text-shadow-color: rgba(255, 255, 255, 0.95);\n}\n\n/* ------------------------------------------------------------------ appearance button */\n\nhtml.ppx-zh .pz-theme-button svg {\n    display: block;\n    width: 100%;\n    height: 100%;\n}\n";
 // Tampermonkey runs this in the page world, alongside ppixiv.  ppixiv replaces setTimeout, fetch
 // and createElement there, and createElement("style") throws, so nothing here may use them.
 
@@ -599,19 +637,36 @@ function translateString(raw)
 
 // ppixiv's elements all carry the "widget" class.  Anything outside one belongs to Pixiv or to
 // other extensions sharing the page (Powerful Pixiv Downloader, UTags), so leave it alone.
-function isSkipped(element)
+// text is the normalized text being translated, or null for attributes.
+function isSkipped(element, text = null)
 {
-    if(element == null || element.closest(".widget") == null)
+    if(element == null || element.closest(".widget") == null || element.closest(ICON_SELECTOR) != null)
         return true;
+    if(element.closest(TAG_BUTTON_LABEL_SELECTOR) != null)
+        return !TAG_BUTTON_LABELS.has(text);
     if(element.closest(ALLOW_SELECTOR) != null)
         return false;
-    return element.closest(SKIP_SELECTOR) != null;
+    return element.closest(SKIP_SELECTOR) != null || showsUserContent(element);
+}
+
+// User content in elements that also show UI text, depending on state.
+function showsUserContent(element)
+{
+    // The image viewer's error text is the muted tag or user name when "Muted:" is shown next
+    // to it, and an error message otherwise.
+    const errorText = element.closest(".viewer-error .error-text");
+    if(errorText != null)
+        return errorText.parentElement.querySelector(".muted-label")?.hidden === false;
+
+    // The mobile info dialog's header is the work's title.  The "More" dialog shares the class.
+    const header = element.closest(".mobile-illust-ui-dialog .header-text");
+    return header != null && header.closest(".mobile-illust-ui-dialog").querySelector(".mobile-image-info") != null;
 }
 
 function translateTextNode(node)
 {
     const text = node.nodeValue;
-    if(!text || !/[A-Za-z]/.test(text) || isSkipped(node.parentElement))
+    if(!text || !/[A-Za-z]/.test(text) || isSkipped(node.parentElement, normalize(text)))
         return;
 
     const translated = translateString(text);
@@ -722,16 +777,51 @@ function ppixivIsRunning()
 
 // Use a constructed stylesheet.  It doesn't go through createElement, and adopted sheets come
 // after all of the document's own stylesheets in the cascade, so equal-specificity rules
-// resolve in our favor.
+// resolve in our favor.  Safari before 16.4 can't construct stylesheets, so it gets a <style>
+// element kept at the end of <head> instead.  ppixiv's createElement refuses to create one, but
+// it keeps the original as realCreateElement.
+let themeStyle = null;
+
 function ensureStyle()
 {
-    if(themeSheet == null)
+    if(themeSheet == null && themeStyle == null)
     {
-        themeSheet = new CSSStyleSheet();
-        themeSheet.replaceSync(THEME_CSS);
+        try {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync(THEME_CSS);
+            if(!Array.isArray(document.adoptedStyleSheets))
+                throw new Error("no adoptedStyleSheets");
+            themeSheet = sheet;
+        } catch(e) {
+            themeStyle = (document.realCreateElement ?? document.createElement).call(document, "style");
+            themeStyle.textContent = THEME_CSS;
+        }
     }
-    if(!document.adoptedStyleSheets.includes(themeSheet))
-        document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+
+    if(themeSheet != null)
+    {
+        if(!document.adoptedStyleSheets.includes(themeSheet))
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+    }
+    else if(document.head.lastElementChild != themeStyle)
+        document.head.append(themeStyle);
+}
+
+// Run each feature on its own, so one that throws, for example after a ppixiv update, can't
+// stop the others or the translation.  Each feature's first error is logged.
+const failedSetups = new Set();
+
+function runSetup(setup)
+{
+    try {
+        setup();
+    } catch(e) {
+        if(!failedSetups.has(setup))
+        {
+            failedSetups.add(setup);
+            console.error("ppixiv-zh:", setup.name, e);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ bookmark + download button
@@ -880,13 +970,14 @@ document.addEventListener("click", (e) => {
 // ------------------------------------------------------------------ no fullscreen on double-click
 
 // ppixiv toggles browser fullscreen when an image is double-clicked, with no setting to turn it
-// off.  Stop the event before it reaches the image view.  The image editors use double-clicks
-// themselves, so leave those alone.  On mobile (including iPads) ppixiv uses double-tap to zoom
-// instead of fullscreen, so leave that alone too.
+// off.  Stop the event before it reaches the image view (.view-container, where ppixiv listens).
+// The info box beside it has its own double-click actions, like the avatar opening the user's
+// works.  The image editors use double-clicks themselves, so leave those alone.  On mobile
+// (including iPads) ppixiv uses double-tap to zoom instead of fullscreen, so leave that alone too.
 document.addEventListener("dblclick", (e) => {
     if(!active || document.documentElement.classList.contains("mobile"))
         return;
-    if(!e.target.closest?.(".screen-illust-container"))
+    if(!e.target.closest?.(".screen-illust-container .view-container"))
         return;
     if(e.target.closest(".crop-editor-overlay, .inpaint-editor-overlay, .pan-editor-overlay, .video-ui"))
         return;
@@ -931,11 +1022,18 @@ function pixivAjaxUrl(url, init)
     }
 }
 
+// ppixiv sets realFetch once at startup, so the hook only needs installing once.  Checking
+// pzHooked alone isn't enough: if another script wraps our hook, realFetch is its wrapper,
+// and hooking that would run the filter twice, one inside the other.  pzHooked still stops a
+// second installed copy of this script.
+let fetchHookInstalled = false;
+
 function installFetchHook()
 {
     const realFetch = window.realFetch;
-    if(typeof realFetch != "function" || realFetch.pzHooked)
+    if(fetchHookInstalled || typeof realFetch != "function" || realFetch.pzHooked)
         return;
+    fetchHookInstalled = true;
 
     const hookedFetch = async function(url, init)
     {
@@ -966,17 +1064,20 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
     // illustType: 0 is an illustration, 1 is manga, 2 is an animation.
     const keep = (thumb) => type == "manga"? thumb.illustType == 1:thumb.illustType != 1;
 
+    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
+    // page left empty ends the feed, so only new works count.  Discovery media IDs are always
+    // "illust:<id>-0" (ppixiv's util/media-id.js).
+    const seen = new Set(window.ppixiv?.app?.currentDataSource?.idList?.getAllMediaIds?.() ?? []);
+
     let last = null;
     const kept = [];
-    const seen = new Set();
     const tagTranslation = {};
     for(let request = 0; request < DISCOVERY_MAX_REQUESTS; ++request)
     {
         if(request > 0)
         {
             await new Promise((resolve) => later(resolve, DISCOVERY_RETRY_DELAY_MS));
-            if(init?.signal?.aborted)
-                break;
+            init?.signal?.throwIfAborted?.();
         }
 
         const response = await fetchFunc(url, init);
@@ -986,23 +1087,20 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
         } catch(e) {
         }
 
+        // Give ppixiv the error, as it would get without the filter.  Earlier requests kept
+        // nothing, or the loop would have stopped.
         const thumbs = json?.body?.thumbnails?.illust;
         if(!Array.isArray(thumbs))
-        {
-            // Give ppixiv the error if the first request failed.  If a retry failed, return
-            // what we have so far.
-            if(last == null)
-                return response;
-            break;
-        }
+            return response;
 
         last = { response, json };
         Object.assign(tagTranslation, json.body.tagTranslation);
         for(const thumb of thumbs)
         {
-            if(keep(thumb) && !seen.has(thumb.id))
+            const mediaId = `illust:${thumb.id}-0`;
+            if(keep(thumb) && !seen.has(mediaId))
             {
-                seen.add(thumb.id);
+                seen.add(mediaId);
                 kept.push(thumb);
             }
         }
@@ -1013,7 +1111,7 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
     if(kept.length == 0)
     {
         const label = DISCOVERY_TYPES.find(([key]) => key == type)[1];
-        window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有${label}，已停止加载。点刷新按钮可以重新获取。`);
+        window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有新的${label}，已停止加载。点刷新按钮可以重新获取。`);
     }
 
     const { response, json } = last;
@@ -1203,15 +1301,18 @@ systemDark.addEventListener("change", () => {
         applyTheme();
 });
 
+// The button goes left of the gear: in the toolbar above the results on desktop, and in the
+// navigation bar at the bottom on phones and iPads.
 function setupThemeButton()
 {
-    const row = document.querySelector(".screen-search-container .thumbnail-ui-box .button-row");
+    const row = document.querySelector(".screen-search-container .thumbnail-ui-box .button-row") ??
+        document.querySelector(".screen-search-container .mobile-navigation-bar .button-row");
     if(row == null || row.querySelector(".pz-theme-button"))
         return;
 
     const button = document.createElement("div");
     button.className = "icon-button popup pz-theme-button";
-    const settings = row.querySelector(".settings-menu-box");
+    const settings = row.querySelector(".settings-menu-box, .preferences-button");
     if(settings)
         settings.before(button);
     else
@@ -1231,11 +1332,12 @@ function setupThemeButton()
 // Two kinds of prefetching, both through the browser's HTTP cache.  ppixiv's viewer loads the
 // same URLs with <img>, so it finds them already downloaded.
 //
-// - Hovering a thumbnail for a moment fetches the work's info and starts downloading the
-//   original.  Without this, opening a work waits for the info request before the original
-//   even starts.
+// - Moving the mouse onto a thumbnail and resting there for a moment fetches the work's info and
+//   starts downloading the original.  Without this, opening a work waits for the info request
+//   before the original even starts.
 // - While reading a multi-page work, the next pages are downloaded in parallel.  ppixiv's own
-//   preloader fetches one page at a time and delays pages that aren't adjacent.
+//   preloader fetches one page at a time and delays pages that aren't adjacent.  This follows
+//   ppixiv's "Preload manga" setting.
 //
 // Each hover prefetch costs an API request and a full-size download, so hovers are limited to
 // HOVER_PREFETCH_LIMIT a minute, leaving Pixiv's rate limits to ppixiv.  Nothing is prefetched
@@ -1304,6 +1406,27 @@ function parseMediaId(mediaId)
     return match ? { page: Number(match[2] ?? 0) } : null;
 }
 
+// mediaCache.getMediaInfo, except that a failed request isn't remembered.  ppixiv records
+// failures in _nonexistantMediaIds and never retries them, not even when the work is opened,
+// so a dropped connection during a prefetch would make the work unopenable until a reload.
+// Errors Pixiv itself returns, like a deleted work, are kept as ppixiv keeps them.
+async function getMediaInfoForPrefetch(mediaCache, mediaId)
+{
+    const failures = mediaCache._nonexistantMediaIds;
+    const key = mediaId.replace(/^illust:(\d+).*$/, "illust:$1-0"); // ppixiv's getMediaIdFirstPage
+    const failedBefore = failures != null && key in failures;
+    const info = await mediaCache.getMediaInfo(mediaId);
+    if(info == null && failures != null && !failedBefore)
+    {
+        // "Invalid response" means the request failed.  A message like "429 Too Many Requests"
+        // means Pixiv answered with an error page instead of JSON.
+        const message = String(failures[key] ?? "");
+        if(message == "Invalid response" || /^\d{3}\b/.test(message))
+            delete failures[key];
+    }
+    return info;
+}
+
 async function prefetchPages(mediaId, pages)
 {
     const ppixiv = window.ppixiv;
@@ -1311,7 +1434,7 @@ async function prefetchPages(mediaId, pages)
         return;
 
     // Loading full info here also means the viewer won't wait for it when the work is opened.
-    const info = await ppixiv.mediaCache.getMediaInfo(mediaId);
+    const info = await getMediaInfoForPrefetch(ppixiv.mediaCache, mediaId);
     if(info == null || info.illustType == 2)
         return;
     if(ppixiv.muting?.anyTagMuted?.(info.tagList) || ppixiv.muting?.isUserIdMuted?.(info.userId))
@@ -1322,10 +1445,45 @@ async function prefetchPages(mediaId, pages)
             prefetchUrl(info.getMainImageUrl(page).url);
 }
 
+// Return true if hovering a work would request anything: its full info isn't loaded yet, or
+// its original or 540 preview isn't downloaded or downloading.
+function hoverWouldFetch(mediaId, page)
+{
+    const mediaCache = window.ppixiv?.mediaCache;
+    try {
+        const info = mediaCache?.getMediaInfoSync(mediaId);
+        if(info == null)
+            return true;
+        const have = (url) => url == null || prefetched.has(url) || prefetching.has(url);
+        return !have(info.getMainImageUrl(page).url) ||
+            !have(mediaCache.getMediaInfoSync(mediaId, { full: false })?.previewUrls?.[page]);
+    } catch(e) {
+        return true;
+    }
+}
+
+const HOVER_THUMB_SELECTOR = ".screen-search-container .thumbnail-box [data-media-id], .screen-search-container .thumbnail-box[data-media-id]";
+
+// Scrolling under a still mouse fires pointerover for whatever ends up under it, but not
+// pointermove.  So pointerover only cancels a pending hover, and the hover starts when the mouse
+// moves onto a thumbnail.
 document.addEventListener("pointerover", (e) => {
     if(!active || e.pointerType != "mouse")
         return;
-    const thumb = e.target.closest?.(".screen-search-container .thumbnail-box [data-media-id], .screen-search-container .thumbnail-box[data-media-id]");
+    const mediaId = e.target.closest?.(HOVER_THUMB_SELECTOR)?.dataset.mediaId ?? null;
+    if(mediaId == hoveredMediaId)
+        return;
+
+    hoveredMediaId = null;
+    if(hoverTimer != null)
+        cancelLater(hoverTimer);
+    hoverTimer = null;
+}, true);
+
+document.addEventListener("pointermove", (e) => {
+    if(!active || e.pointerType != "mouse")
+        return;
+    const thumb = e.target.closest?.(HOVER_THUMB_SELECTOR);
     const mediaId = thumb?.dataset.mediaId ?? null;
     if(mediaId == hoveredMediaId)
         return;
@@ -1344,7 +1502,9 @@ document.addEventListener("pointerover", (e) => {
             return;
 
         // Muted works show a placeholder.  Don't download what the user chose not to see.
-        if(thumb.closest(".thumbnail-box")?.classList.contains("muted") || !takeHoverPrefetch())
+        // Hovers that would request nothing don't count towards the limit.
+        if(thumb.closest(".thumbnail-box")?.classList.contains("muted") || !hoverWouldFetch(mediaId, parsed.page) ||
+            !takeHoverPrefetch())
             return;
 
         // ppixiv can often guess the original's URL from the thumbnail without waiting for
@@ -1376,8 +1536,14 @@ function prefetchUpcomingMangaPages()
     const parsed = parseMediaId(mediaId);
     if(parsed == null)
         return;
+
+    // Follow ppixiv's "Preload manga" setting.  "Thumbnails only" preloads no other pages, and
+    // "Nearby pages" only preloads the next one.  ppixiv defaults to thumbnails only on mobile.
+    const mode = window.ppixiv?.settings?.get?.("preload_manga");
+    if(mode == "thumbnails")
+        return;
     const pages = [];
-    for(let i = 1; i <= MANGA_PAGES_AHEAD; ++i)
+    for(let i = 1; i <= (mode == "partial" ? 1 : MANGA_PAGES_AHEAD); ++i)
         pages.push(parsed.page + i);
     prefetchPages(mediaId, pages).catch(() => {});
 }
@@ -1396,9 +1562,10 @@ function prefetchUpcomingMangaPages()
 //
 // Each thumbnail gets the cheapest one that covers its size on screen in device pixels.  The
 // first choice is made when ppixiv sets the URL, from the size ppixiv plans for the thumbnail,
-// so the 540 image is never downloaded.  A ResizeObserver then upgrades thumbnails that end up
-// larger: the layout stretches short rows, and the thumbnail size slider and browser zoom change
-// sizes later.  Upgrades load in the background and replace the image once decoded.
+// so the 540 image is never downloaded, except in the manga view (see inMangaView).  A
+// ResizeObserver then upgrades thumbnails that end up larger: the layout stretches short rows,
+// and the thumbnail size slider and browser zoom change sizes later.  Upgrades load in the
+// background and replace the image once decoded.
 //
 // The tiers allowed depend on how long recent thumbnails took to download, so a slow connection
 // falls back to smaller files.  "Save data" in the browser always uses the smallest tier.
@@ -1494,9 +1661,26 @@ function pickThumbTier(mediaId, cssWidth, cssHeight)
 const imgSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
 const setImgSrc = (img, url) => imgSrc.set.call(img, url);
 
+// ppixiv zooms square thumbnails to 125% while the mouse isn't over them (--zoom-thumb in its
+// main.scss).  Layout sizes leave the zoom out and getBoundingClientRect includes it, so layout
+// sizes are scaled by this.  Otherwise the IntersectionObserver would pick a larger size than
+// the one already loading, and every thumbnail would download twice.
+const canHover = window.matchMedia("(hover: hover)");
+function thumbZoom()
+{
+    const body = document.body;
+    return body != null && canHover.matches && !body.classList.contains("disable-thumbnail-zooming") ? 1.25 : 1;
+}
+
+// In the manga view, ppixiv loads each page's 540 thumbnail to learn its aspect ratio before it
+// creates the thumbnails, so those URLs are already downloaded.  Swapping them would leave the
+// thumbnails blank until a different file downloads, so keep them and upgrade in the background.
+const inMangaView = () => window.ppixiv?.app?.currentDataSource?.name == "manga";
+
 const thumbResizeObserver = new ResizeObserver((entries) => {
+    const zoom = thumbZoom();
     for(const entry of entries)
-        maybeUpgradeThumb(entry.target, entry.contentRect.width, entry.contentRect.height);
+        maybeUpgradeThumb(entry.target, entry.contentRect.width * zoom, entry.contentRect.height * zoom);
 });
 
 function trackThumb(img, url)
@@ -1550,7 +1734,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
         if(active && this.classList.contains("thumb") && thumbsEnabled())
         {
             const state = trackThumb(this, String(value));
-            if(state != null && !state.failed)
+            if(state != null && !state.failed && !inMangaView())
             {
                 // At this point ppixiv has only decided the size it wants for the thumbnail.
                 // It adds the thumbnail to a row right after, in the same task, and stretches
@@ -1558,12 +1742,13 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
                 // sends the request.  ppixiv waits for the image to load right after setting
                 // it, so the src can't be left empty until then.
                 const box = this.closest(".thumbnail-box");
-                state.tier = pickThumbTier(state.mediaId, box.origWidth, box.origHeight);
+                const zoom = thumbZoom();
+                state.tier = pickThumbTier(state.mediaId, box.origWidth * zoom, box.origHeight * zoom);
                 value = thumbUrl(state, state.tier);
                 queueMicrotask(() => {
                     if(thumbStates.get(this) != state || state.failed || !thumbsEnabled() || box.currentWidth == null)
                         return;
-                    const tier = pickThumbTier(state.mediaId, box.currentWidth, box.currentHeight);
+                    const tier = pickThumbTier(state.mediaId, box.currentWidth * zoom, box.currentHeight * zoom);
                     if(tier > state.tier)
                     {
                         state.tier = tier;
@@ -1597,15 +1782,27 @@ function upgradeThumb(img, state, tier)
     loader.onerror = () => {
         if(state.upgrading == tier)
             state.upgrading = null;
-        thumbFailed(state);
+        thumbFailed(state, url);
     };
     setImgSrc(loader, url);
 }
 
+// Load url in an image outside the page, and call done(true) if it loads or done(false).
+function loadDetached(url, done)
+{
+    const loader = document.createElement("img");
+    loader.onload = () => done(true);
+    loader.onerror = () => done(false);
+    setImgSrc(loader, url);
+}
+
 // Stop trying larger sizes for an image once one fails, so scrolling it back into view doesn't
-// try again.  Failures while offline aren't Pixiv's fault, so they don't count towards turning
-// the feature off.
-function thumbFailed(state)
+// try again.  The failure only counts towards turning the feature off if the connection isn't
+// to blame: ppixiv's 540 has to load, and then url has to fail a second time.  An error event
+// can't tell a refused size from a dropped connection, and one connection reset can fail a
+// whole page of thumbnails at once.  When the connection was to blame, the image is forgotten,
+// and gets larger sizes again once the observers see it or ppixiv rebuilds it.
+function thumbFailed(state, url)
 {
     if(state.failed)
         return;
@@ -1613,8 +1810,17 @@ function thumbFailed(state)
     if(failedThumbUrls.has(state.base))
         return;
     failedThumbUrls.add(state.base);
-    if(navigator.onLine !== false)
-        thumbFailures++;
+
+    const forget = () => {
+        failedThumbUrls.delete(state.base);
+        state.failed = false;
+    };
+    loadDetached(state.base, (connected) => {
+        if(!connected)
+            forget();
+        else
+            loadDetached(url, (ok) => ok? forget():thumbFailures++);
+    });
 }
 
 // If Pixiv refuses one of these sizes for some image, go back to ppixiv's URL.
@@ -1623,15 +1829,19 @@ document.addEventListener("error", (e) => {
     const state = thumbStates.get(img);
     if(state == null || state.tier == THUMB_BASE || img.currentSrc != thumbUrl(state, state.tier))
         return;
-    thumbFailed(state);
+    thumbFailed(state, img.currentSrc);
     state.tier = THUMB_BASE;
     state.upgrading = null;
     setImgSrc(img, state.base);
 
     // ppixiv learns aspect ratios from thumbnails as they load, and recorded 0 for the failed
     // one.  The manga view and the image viewer lay pages out with it, so measure again once
-    // ppixiv's own thumbnail has loaded.
-    window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
+    // ppixiv's own thumbnail has loaded.  Measuring now doesn't work: ppixiv's listeners would
+    // see the error that is still being dispatched and record 0 again.
+    img.addEventListener("load", () => {
+        if(thumbStates.get(img) == state && img.currentSrc == state.base)
+            window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
+    }, { once: true });
 }, true);
 
 // Estimate how long one thumbnail takes to download with the connection to itself.  A
@@ -1677,7 +1887,8 @@ new PerformanceObserver((list) => {
     if(changed)
         updateThumbLoadMs();
 
-    // When the connection gets faster, thumbnails loaded while it was slow are still small.
+    // When the connection gets faster, thumbnails loaded while it was slow are still smaller or
+    // lower quality.
     if(Math.max(...allowedThumbTiers()) > maxBefore)
         upgradeVisibleThumbs();
 }).observe({ type: "resource" });
@@ -1735,20 +1946,18 @@ function trackExistingThumbs()
 
 // ------------------------------------------------------------------ activation (continued)
 
+// Features that look for their part of ppixiv's UI on activation and after every DOM change.
+const SETUPS = [ensureStyle, installFetchHook, setupChineseTags, setupThemeButton, setupBookmarkDownloadButton,
+    setupSimilarButton, setupDiscoveryTypeButtons];
+
 function activate()
 {
     active = true;
-    applyTheme();
-    ensureStyle();
+    runSetup(applyTheme);
     document.documentElement.classList.add(ON_CLASS);
     processTree(document.body);
-    installFetchHook();
-    setupChineseTags();
-    setupThemeButton();
-    setupBookmarkDownloadButton();
-    setupSimilarButton();
-    setupDiscoveryTypeButtons();
-    trackExistingThumbs();
+    SETUPS.forEach(runSetup);
+    runSetup(trackExistingThumbs);
     new MutationObserver(translateTitle).observe(document.head, { subtree: true, childList: true, characterData: true });
     translateTitle();
 }
@@ -1756,7 +1965,7 @@ function activate()
 const observer = new MutationObserver((mutations) => {
     // ppixiv sets up realFetch before it builds its UI, so hook it as early as possible.  The
     // first requests then ask for Chinese tag translations too.
-    installFetchHook();
+    runSetup(installFetchHook);
 
     if(!active)
     {
@@ -1765,13 +1974,8 @@ const observer = new MutationObserver((mutations) => {
         return;
     }
 
-    ensureStyle();
-    setupChineseTags();
-    setupThemeButton();
-    setupBookmarkDownloadButton();
-    setupSimilarButton();
-    setupDiscoveryTypeButtons();
-    prefetchUpcomingMangaPages();
+    SETUPS.forEach(runSetup);
+    runSetup(prefetchUpcomingMangaPages);
     for(const mutation of mutations)
     {
         if(mutation.type == "childList")
@@ -1805,14 +2009,17 @@ observer.observe(document, {
     attributeFilter: ATTRS,
 });
 
-// Translate the browser tab title too ("Rankings - ppixiv" and similar).
+// Translate the browser tab title too ("Rankings - ppixiv" and similar).  On a user's page the
+// title is the user's name, which is left alone.
 function translateTitle()
 {
     if(!active)
         return;
     const title = document.title;
     const match = title.match(/^(.*?)( - ppixiv)?$/);
-    const translated = match && translateString(match[1]);
+    if(match == null || match[1] == window.ppixiv?.app?.currentDataSource?.userInfo?.name)
+        return;
+    const translated = translateString(match[1]);
     if(translated != null)
         document.title = translated + (match[2] ?? "");
 }

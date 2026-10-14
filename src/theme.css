@@ -178,8 +178,7 @@ html.ppx-zh .icon-button::before {
 }
 
 @media (hover: hover) {
-    html.ppx-zh .icon-button:hover::before,
-    html.ppx-zh .popup-visible > .icon-button::before {
+    html.ppx-zh .icon-button:hover::before {
         background: var(--pz-raise-hover);
         transform: scale(1);
     }
@@ -390,8 +389,10 @@ html.ppx-zh .search-view .thumbnail-box .bottom-row {
     padding: 0 6px;
 }
 
+/* These sit on the image in both themes, so their text stays light. */
 html.ppx-zh .search-view .thumbnail-box .bottom-row .thumbnail-label,
 html.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box {
+    color: #fff;
     background: rgba(12, 13, 16, 0.62);
     -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
@@ -411,15 +412,17 @@ html.ppx-zh .search-view .thumbnail-box .bottom-row .manga-info-box:hover {
     border-color: transparent;
 }
 
+/* ppixiv gives each expanded post its own underline color inline, to tell neighboring posts
+ * apart. */
 html.ppx-zh .search-view .thumbnail-box.expanded-thumb a.thumbnail-link {
-    border-bottom-color: var(--pz-accent);
     border-bottom-width: 4px;
 }
 
+/* On the darkened image in both themes. */
 html.ppx-zh .search-view .thumbnail-box.muted .muted-text .muted-label {
     font-size: 13px;
     font-weight: 600;
-    color: var(--pz-text-2);
+    color: rgba(255, 255, 255, 0.75);
 }
 
 html.ppx-zh .search-view > .no-results > .message {
@@ -619,10 +622,6 @@ html.ppx-zh .popup-context-menu .button-strip .button.enabled.selected {
     box-shadow: inset 0 0 0 1px var(--pz-accent-ring);
 }
 
-html.ppx-zh .popup-context-menu .button-strip .button .tag-dropdown-arrow {
-    border-top-color: var(--pz-menu-button);
-}
-
 html.ppx-zh .popup-context-menu .avatar-widget .avatar {
     border-radius: 11px;
 }
@@ -649,8 +648,13 @@ html.ppx-zh .dialog {
     box-shadow: var(--pz-shadow);
 }
 
-html.ppx-zh :has(> .dialog).floating > .dialog {
+/* ppixiv shows dialogs as full-width sheets, without .floating, when the window is under 500px
+ * in either direction, as on phones.  Those keep ppixiv's own top-only rounding. */
+html.ppx-zh :has(> .dialog) > .dialog {
     background: var(--pz-dialog-bg);
+}
+
+html.ppx-zh :has(> .dialog).floating > .dialog {
     border-radius: 20px;
 }
 
@@ -805,10 +809,24 @@ html.ppx-zh .muted-tags-popup .mute-warning {
     line-height: 1.6;
 }
 
+/* ------------------------------------------------------------------ image editor */
+
+/* The editor's buttons sit straight on the image.  ppixiv gives them a black background, and
+ * the theme's translucent button colors would leave them unreadable over a bright or dark image,
+ * so every state gets an opaque color here. */
+html.ppx-zh .image-editor {
+    --box-link-bg-color: var(--pz-surface-solid);
+    --box-link-hover-color: color-mix(in srgb, var(--pz-text) 12%, var(--pz-surface-solid));
+    --box-link-selected-color: color-mix(in srgb, var(--pz-accent) 22%, var(--pz-surface-solid));
+    --box-link-selected-hover-color: color-mix(in srgb, var(--pz-accent) 30%, var(--pz-surface-solid));
+}
+
 /* ------------------------------------------------------------------ video controls */
 
+/* The controls fill the strip, so it can't fade out completely without losing contrast at the
+ * top.  ppixiv's own strip is rgba(0, 0, 0, 0.5). */
 html.ppx-zh .video-ui > .video-ui-strip {
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0));
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.5));
 }
 
 html.ppx-zh .seek-bar > .seek-parts > [data-seek-part="fill"] {
@@ -878,7 +896,7 @@ html.ppx-zh.pz-light {
 }
 
 /* Dim the page behind dialogs less. */
-html.ppx-zh.pz-light :has(> .dialog).floating {
+html.ppx-zh.pz-light :has(> .dialog) {
     background-color: rgba(20, 24, 34, calc(var(--dialog-visible, 1) * 0.28));
 }
 
@@ -889,6 +907,44 @@ html.ppx-zh.pz-light .input-dropdown .search .word.or {
 
 html.ppx-zh.pz-light .years-ago > a {
     background-color: var(--pz-raise);
+}
+
+/* Section headers in the tag search dropdown ("Recent tags", saved groups).  ppixiv draws them
+ * navy with inherited text color.  They're sticky, so the background has to stay opaque. */
+html.ppx-zh.pz-light .input-dropdown .tag-section {
+    background-color: #e9edf4;
+    color: var(--pz-text-2);
+}
+
+html.ppx-zh.pz-light .input-dropdown :is(.edit-button, .group-suggestions-button) {
+    border-color: var(--pz-border-strong);
+}
+
+@media (hover: hover) {
+    html.ppx-zh.pz-light .input-dropdown :is(.edit-button, .group-suggestions-button):hover {
+        border-color: var(--pz-text-3);
+    }
+}
+
+/* Other colors ppixiv hard-codes for its dark background: the non-premium warning icon in the
+ * mute settings, already-muted tags in the "Edit mutes" dialog, and the text prompt's submit
+ * button. */
+html.ppx-zh.pz-light .non-premium-mute-warning .icon {
+    color: var(--pz-warning-text);
+}
+
+html.ppx-zh.pz-light .post-mute-list .entry.muted .tag-name {
+    color: #c0392b;
+}
+
+html.ppx-zh.pz-light .text-entry-popup .input-box > .submit-button {
+    border-color: var(--pz-border-strong);
+}
+
+@media (hover: hover) {
+    html.ppx-zh.pz-light .text-entry-popup .input-box > .submit-button:hover {
+        background-color: var(--pz-raise-hover);
+    }
 }
 
 /* ppixiv fades the search results behind the image view to black.  Keep its opacity formula,

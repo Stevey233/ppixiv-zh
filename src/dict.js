@@ -82,6 +82,7 @@ const DICT = {
     "Original": "原创",
     "Original rankings": "原创排行",
     "AI": "AI",
+    "AI-generated": "AI 生成",
     "Show AI works": "显示 AI 作品",
     "Male": "男性",
     "Popular with men": "受男性欢迎",
@@ -401,6 +402,8 @@ const DICT = {
     "Rename group:": "重命名分组：",
     "Add section": "添加分组",
     "Delete tag group": "删除标签分组",
+    // ppixiv sets this with innerText, which splits the message into a text node per line.
+    "Delete this group and all tags inside it? This can't be undone.": "删除此分组及其中的所有标签？此操作无法撤销。",
     "Edit": "编辑",
     "Saved tag already exists": "这个标签已经保存过了",
     "Saved tag updated": "已更新保存的标签",
@@ -478,7 +481,6 @@ const PATTERNS = [
     [/^Page (\d+)$/, "第 $1 页"],
     [/^(\d+) pages?$/, "共 $1 页"],
     [/^Refresh search from page (\d+)$/, "从第 $1 页刷新搜索"],
-    [/^by (.+)$/, "作者：$1"],
     [/^Show (R18G?|ALL) works$/i, (m, a) => a.toUpperCase() == "ALL" ? "显示全部作品" : `显示 ${a.toUpperCase()} 作品`],
     [/^(Mute|Unmute) this user$/, (m, a) => a == "Mute" ? "屏蔽此用户" : "取消屏蔽此用户"],
     [/^Muted the (tag|user) (.+)$/, (m, t, l) => `已屏蔽${t == "tag" ? "标签" : "用户"} ${l}`],
@@ -514,19 +516,55 @@ const PATTERNS = [
     [/^Error following user (\d+): (.+)$/, "关注用户 $1 时出错：$2"],
     [/^The file "(.+)" doesn't contain exported ppixiv data\.$/, "文件「$1」不包含 ppixiv 导出的数据。"],
     [/^Saved Tags (\d+)$/, "已保存的标签 $1"],
+    // The heading of your own bookmarks: "1234 Private Bookmarks / tag".  The count is missing
+    // until it loads.
+    [/^(?:(\d+) )?(Public |Private )?Bookmarks?(?: \/ (.+))?$/, (m, n, kind, tag) =>
+        (n ? `${n} 个` : "") + (kind == "Public " ? "公开" : kind == "Private " ? "非公开" : "") + "收藏" +
+        (tag == null ? "" : tag == "untagged" ? " / 未分类" : ` / ${tag}`)],
+    [/^(\d+) frames$/, "$1 帧"],
+    [/^Suggestions for (.+)$/, "「$1」的建议"],
+    // The time filter button shows "2 years" after "2 years ago" is picked.
+    [/^([1-7]) years?$/, "$1 年前"],
+    [/^Clear (\d+) recent search(?:es)?\?$/, "清除 $1 条最近搜索？"],
+    [/^This group contains (\d+) tags?\.$/, "此分组包含 $1 个标签。"],
+    [/^Artist: (.+)$/, "作者：$1"],
     [/^(\d+(?:\.\d+)?) seconds?$/, "$1 秒"],
 ];
 
-// Text that should never be translated because it's an icon ligature, user content, or
-// the ppixiv changelog.
+// Icon ligatures are never text, even inside the rows ALLOW_SELECTOR lets through.
+const ICON_SELECTOR = ".font-icon, .material-icons, .ppixiv-icon";
+
+// Text that should never be translated because it's user content or the ppixiv changelog.
 const SKIP_SELECTOR = [
-    ".font-icon", ".material-icons", ".ppixiv-icon",
-    "input", "textarea", "[contenteditable]", "script", "style",
+    "textarea", "[contenteditable]", "script", "style",
     ".description", ".title", ".author", ".folder-text", ".tag", ".tag-entry", ".tag-name",
     ".tag-list", ".search-tags", ".word", ".user-name", ".username",
     ".thumbnail-label", ".whats-new-dialog", ".follow-tag", ".utags_ul", ".avatar-widget",
+    // User names and tags that ppixiv shows outside the containers above.
+    ".thumbnail-box .muted-label", ".follow-widget .view-posts .label",
+    // ppixiv copies the hovered element's data-popup here, and that is already translated
+    // unless it came from user content, like an avatar's user name.
+    ".tooltip-display-text",
+    // Saved search groups are named by the user.  "Saved tags" is ppixiv's default name.
+    ".tag-section[data-group]:not([data-group='Saved tags']) > .label",
 ].join(",");
 
-// Exceptions inside skipped containers: the bookmark tag dropdown is a .tag-list, but its
-// "Add", "Refresh" and "Loading..." rows are UI, not tags.
-const ALLOW_SELECTOR = ".popup-bookmark-tag-entry:not(.tag-toggle)";
+// Exceptions inside skipped containers: fixed UI rows that sit among user tags.
+// - the bookmark tag dropdown's "Add" and "Refresh" rows, and its "Loading..." row
+// - the "All", "All bookmarks" and "All tags" default rows of tag filter dropdowns, and the
+//   "Untagged" row that always follows "All bookmarks"
+// - "Add new tag", always the first row of the follow tag list
+// - the "AI-generated" row of the info panel's tag list, the only row without a link
+const ALLOW_SELECTOR = [
+    ".popup-bookmark-tag-entry:not(.tag-toggle)", ".tag-list > .loading",
+    ".tag-entry[data-default]", ".tag-entry[data-default] + .tag-entry[data-type=bookmark-tag]",
+    ".vertical-list > .follow-tag:first-child", ".tag-list > .tag-entry:not([href])",
+].join(",");
+
+// Tag filter buttons show the selected entry's label, which is the user's tag once one is
+// picked.  Only ppixiv's own labels are translated there.
+const TAG_BUTTON_LABEL_SELECTOR = [
+    ".bookmark-tag-button .label", ".follow-tag-button .label", ".follow-tags-button .label",
+    ".member-tags-button .label",
+].join(",");
+const TAG_BUTTON_LABELS = new Set(["All bookmarks", "Untagged", "All tags", "Tags", "All", "Other"]);
