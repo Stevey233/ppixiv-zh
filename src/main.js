@@ -23,19 +23,36 @@ function translateString(raw)
 
 // ppixiv's elements all carry the "widget" class.  Anything outside one belongs to Pixiv or to
 // other extensions sharing the page (Powerful Pixiv Downloader, UTags), so leave it alone.
-function isSkipped(element)
+// text is the normalized text being translated, or null for attributes.
+function isSkipped(element, text = null)
 {
-    if(element == null || element.closest(".widget") == null)
+    if(element == null || element.closest(".widget") == null || element.closest(ICON_SELECTOR) != null)
         return true;
+    if(element.closest(TAG_BUTTON_LABEL_SELECTOR) != null)
+        return !TAG_BUTTON_LABELS.has(text);
     if(element.closest(ALLOW_SELECTOR) != null)
         return false;
-    return element.closest(SKIP_SELECTOR) != null;
+    return element.closest(SKIP_SELECTOR) != null || showsUserContent(element);
+}
+
+// User content in elements that also show UI text, depending on state.
+function showsUserContent(element)
+{
+    // The image viewer's error text is the muted tag or user name when "Muted:" is shown next
+    // to it, and an error message otherwise.
+    const errorText = element.closest(".viewer-error .error-text");
+    if(errorText != null)
+        return errorText.parentElement.querySelector(".muted-label")?.hidden === false;
+
+    // The mobile info dialog's header is the work's title.  The "More" dialog shares the class.
+    const header = element.closest(".mobile-illust-ui-dialog .header-text");
+    return header != null && header.closest(".mobile-illust-ui-dialog").querySelector(".mobile-image-info") != null;
 }
 
 function translateTextNode(node)
 {
     const text = node.nodeValue;
-    if(!text || !/[A-Za-z]/.test(text) || isSkipped(node.parentElement))
+    if(!text || !/[A-Za-z]/.test(text) || isSkipped(node.parentElement, normalize(text)))
         return;
 
     const translated = translateString(text);
@@ -146,16 +163,58 @@ function ppixivIsRunning()
 
 // Use a constructed stylesheet.  It doesn't go through createElement, and adopted sheets come
 // after all of the document's own stylesheets in the cascade, so equal-specificity rules
-// resolve in our favor.
+// resolve in our favor.  Safari before 16.4 can't construct stylesheets, so it gets a <style>
+// element kept after the other stylesheets in <head> instead.  ppixiv's createElement refuses to create one, but
+// it keeps the original as realCreateElement.
+let themeStyle = null;
+
 function ensureStyle()
 {
-    if(themeSheet == null)
+    if(themeSheet == null && themeStyle == null)
     {
-        themeSheet = new CSSStyleSheet();
-        themeSheet.replaceSync(THEME_CSS);
+        try {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync(THEME_CSS);
+            if(!Array.isArray(document.adoptedStyleSheets))
+                throw new Error("no adoptedStyleSheets");
+            themeSheet = sheet;
+        } catch(e) {
+            themeStyle = (document.realCreateElement ?? document.createElement).call(document, "style");
+            themeStyle.textContent = THEME_CSS;
+        }
     }
-    if(!document.adoptedStyleSheets.includes(themeSheet))
-        document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+
+    if(themeSheet != null)
+    {
+        if(!document.adoptedStyleSheets.includes(themeSheet))
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+        return;
+    }
+
+    // Move it only when a stylesheet comes after it.  ppixiv replaces <title> on every work shown,
+    // and moving the style each time would re-parse it and restyle the page.
+    let next = themeStyle.isConnected ? themeStyle.nextElementSibling : null;
+    while(next != null && next.tagName != "STYLE" && !(next.tagName == "LINK" && next.rel == "stylesheet"))
+        next = next.nextElementSibling;
+    if(!themeStyle.isConnected || next != null)
+        document.head.append(themeStyle);
+}
+
+// Run each feature on its own, so one that throws, for example after a ppixiv update, can't
+// stop the others or the translation.  Each feature's first error is logged.
+const failedSetups = new Set();
+
+function runSetup(setup)
+{
+    try {
+        setup();
+    } catch(e) {
+        if(!failedSetups.has(setup))
+        {
+            failedSetups.add(setup);
+            console.error("ppixiv-zh:", setup.name, e);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ bookmark + download button
@@ -304,13 +363,14 @@ document.addEventListener("click", (e) => {
 // ------------------------------------------------------------------ no fullscreen on double-click
 
 // ppixiv toggles browser fullscreen when an image is double-clicked, with no setting to turn it
-// off.  Stop the event before it reaches the image view.  The image editors use double-clicks
-// themselves, so leave those alone.  On mobile (including iPads) ppixiv uses double-tap to zoom
-// instead of fullscreen, so leave that alone too.
+// off.  Stop the event before it reaches the image view (.view-container, where ppixiv listens).
+// The info box beside it has its own double-click actions, like the avatar opening the user's
+// works.  The image editors use double-clicks themselves, so leave those alone.  On mobile
+// (including iPads) ppixiv uses double-tap to zoom instead of fullscreen, so leave that alone too.
 document.addEventListener("dblclick", (e) => {
     if(!active || document.documentElement.classList.contains("mobile"))
         return;
-    if(!e.target.closest?.(".screen-illust-container"))
+    if(!e.target.closest?.(".screen-illust-container .view-container"))
         return;
     if(e.target.closest(".crop-editor-overlay, .inpaint-editor-overlay, .pan-editor-overlay, .video-ui"))
         return;
@@ -355,11 +415,18 @@ function pixivAjaxUrl(url, init)
     }
 }
 
+// ppixiv sets realFetch once at startup, so the hook only needs installing once.  Checking
+// pzHooked alone isn't enough: if another script wraps our hook, realFetch is its wrapper,
+// and hooking that would run the filter twice, one inside the other.  pzHooked still stops a
+// second installed copy of this script.
+let fetchHookInstalled = false;
+
 function installFetchHook()
 {
     const realFetch = window.realFetch;
-    if(typeof realFetch != "function" || realFetch.pzHooked)
+    if(fetchHookInstalled || typeof realFetch != "function" || realFetch.pzHooked)
         return;
+    fetchHookInstalled = true;
 
     const hookedFetch = async function(url, init)
     {
@@ -390,16 +457,33 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
     // illustType: 0 is an illustration, 1 is manga, 2 is an animation.
     const keep = (thumb) => type == "manga"? thumb.illustType == 1:thumb.illustType != 1;
 
+    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
+    // page left empty ends the feed, so only new works count.  Discovery media IDs are always
+    // "illust:<id>-0" (ppixiv's util/media-id.js).
+    const source = window.ppixiv?.app?.currentDataSource;
+    const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
+
+    // ppixiv passes no abort signal, so notice when retrying stops helping: the filter changed,
+    // the user left the page, or the feed was replaced.  ppixiv replaces the data source only
+    // after a first page finishes loading, so leaving the page during one shows up as a URL
+    // change.  Opening a work only changes the hash.  Then stop retrying, so ppixiv's next page
+    // doesn't wait for the retries.
+    const where = () => { const url = window.ppixiv?.plocation ?? location; return url.pathname + url.search; };
+    const startedAt = where();
+    const stale = () => discoveryType() != type || where() != startedAt || window.ppixiv?.app?.currentDataSource !== source;
+
     let last = null;
     const kept = [];
-    const seen = new Set();
     const tagTranslation = {};
     for(let request = 0; request < DISCOVERY_MAX_REQUESTS; ++request)
     {
         if(request > 0)
         {
+            if(stale())
+                break;
             await new Promise((resolve) => later(resolve, DISCOVERY_RETRY_DELAY_MS));
-            if(init?.signal?.aborted)
+            init?.signal?.throwIfAborted?.();
+            if(stale())
                 break;
         }
 
@@ -410,23 +494,20 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
         } catch(e) {
         }
 
+        // Give ppixiv the error, as it would get without the filter.  Earlier requests kept
+        // nothing, or the loop would have stopped.
         const thumbs = json?.body?.thumbnails?.illust;
         if(!Array.isArray(thumbs))
-        {
-            // Give ppixiv the error if the first request failed.  If a retry failed, return
-            // what we have so far.
-            if(last == null)
-                return response;
-            break;
-        }
+            return response;
 
         last = { response, json };
         Object.assign(tagTranslation, json.body.tagTranslation);
         for(const thumb of thumbs)
         {
-            if(keep(thumb) && !seen.has(thumb.id))
+            const mediaId = `illust:${thumb.id}-0`;
+            if(keep(thumb) && !seen.has(mediaId))
             {
-                seen.add(thumb.id);
+                seen.add(mediaId);
                 kept.push(thumb);
             }
         }
@@ -434,10 +515,16 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
             break;
     }
 
+    // When retrying stopped early, give ppixiv the last batch unfiltered.  ppixiv keeps this data
+    // source for when the user comes back, and an empty page would end its feed for good.  The
+    // "no works" message would also show over the next page.
+    if(kept.length == 0 && stale())
+        return last.response;
+
     if(kept.length == 0)
     {
         const label = DISCOVERY_TYPES.find(([key]) => key == type)[1];
-        window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有${label}，已停止加载。点刷新按钮可以重新获取。`);
+        window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有新的${label}，已停止加载。点刷新按钮可以重新获取。`);
     }
 
     const { response, json } = last;
@@ -614,6 +701,9 @@ function applyTheme()
     const light = mode == "light" || (mode == "auto" && !systemDark.matches);
     document.documentElement.classList.toggle("pz-light", light);
 
+    // ppixiv sets the browser's toolbar color to black.  #f3f4f7 is --pz-bg in light mode.
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", light ? "#f3f4f7" : "#000");
+
     const button = document.querySelector(".pz-theme-button");
     if(button)
     {
@@ -627,15 +717,34 @@ systemDark.addEventListener("change", () => {
         applyTheme();
 });
 
+// Follow settings changed in other tabs.  Otherwise the buttons here show the old choice, and
+// the next click acts on the other tab's value.  A null key means storage was cleared.  Results
+// already loaded keep their type until the next refresh.
+window.addEventListener("storage", (e) => {
+    if(!active || (e.storageArea != null && e.storageArea != localStorage))
+        return;
+    if(e.key == null || e.key == DISCOVERY_TYPE_KEY)
+    {
+        const row = document.querySelector(".pz-discovery-type");
+        if(row != null)
+            refreshDiscoveryTypeButtons(row);
+    }
+    if(e.key == null || e.key == THEME_KEY)
+        applyTheme();
+});
+
+// The button goes left of the gear: in the toolbar above the results on desktop, and in the
+// navigation bar at the bottom on phones and iPads.
 function setupThemeButton()
 {
-    const row = document.querySelector(".screen-search-container .thumbnail-ui-box .button-row");
+    const row = document.querySelector(".screen-search-container .thumbnail-ui-box .button-row") ??
+        document.querySelector(".screen-search-container .mobile-navigation-bar .button-row");
     if(row == null || row.querySelector(".pz-theme-button"))
         return;
 
     const button = document.createElement("div");
     button.className = "icon-button popup pz-theme-button";
-    const settings = row.querySelector(".settings-menu-box");
+    const settings = row.querySelector(".settings-menu-box, .preferences-button");
     if(settings)
         settings.before(button);
     else
@@ -655,11 +764,12 @@ function setupThemeButton()
 // Two kinds of prefetching, both through the browser's HTTP cache.  ppixiv's viewer loads the
 // same URLs with <img>, so it finds them already downloaded.
 //
-// - Hovering a thumbnail for a moment fetches the work's info and starts downloading the
-//   original.  Without this, opening a work waits for the info request before the original
-//   even starts.
-// - While reading a multi-page work, the next pages are downloaded in parallel.  ppixiv's own
-//   preloader fetches one page at a time and delays pages that aren't adjacent.
+// - Moving the mouse onto a thumbnail and resting there for a moment fetches the work's info and
+//   starts downloading the original.  Without this, opening a work waits for the info request
+//   before the original even starts.
+// - While reading a multi-page work, the next pages are downloaded in parallel once the page on
+//   screen has loaded.  ppixiv's own preloader fetches one page at a time and delays pages that
+//   aren't adjacent.  This follows ppixiv's "Preload manga" setting.
 //
 // Each hover prefetch costs an API request and a full-size download, so hovers are limited to
 // HOVER_PREFETCH_LIMIT a minute, leaving Pixiv's rate limits to ppixiv.  Nothing is prefetched
@@ -728,17 +838,46 @@ function parseMediaId(mediaId)
     return match ? { page: Number(match[2] ?? 0) } : null;
 }
 
-async function prefetchPages(mediaId, pages)
+// mediaCache.getMediaInfo, except that a failed request isn't remembered.  ppixiv records
+// failures in _nonexistantMediaIds and never retries them, not even when the work is opened,
+// so a dropped connection during a prefetch would make the work unopenable until a reload.
+// Errors Pixiv itself returns, like a deleted work, are kept as ppixiv keeps them.
+async function getMediaInfoForPrefetch(mediaCache, mediaId)
+{
+    const failures = mediaCache._nonexistantMediaIds;
+    const key = mediaId.replace(/^illust:(\d+).*$/, "illust:$1-0"); // ppixiv's getMediaIdFirstPage
+    const failedBefore = failures != null && key in failures;
+    const info = await mediaCache.getMediaInfo(mediaId);
+    if(info == null && failures != null && !failedBefore)
+    {
+        // "Invalid response" means the request failed.  A message like "429 Too Many Requests"
+        // means Pixiv answered with an error page instead of JSON.
+        const message = String(failures[key] ?? "");
+        if(message == "Invalid response" || /^\d{3}\b/.test(message))
+            delete failures[key];
+    }
+    return info;
+}
+
+// If shownPage is given, it's the page on screen, and the other pages wait until it has
+// loaded so they don't share the connection with it.
+async function prefetchPages(mediaId, pages, shownPage = null)
 {
     const ppixiv = window.ppixiv;
     if(parseMediaId(mediaId) == null || ppixiv?.mediaCache == null)
         return;
 
     // Loading full info here also means the viewer won't wait for it when the work is opened.
-    const info = await ppixiv.mediaCache.getMediaInfo(mediaId);
+    const info = await getMediaInfoForPrefetch(ppixiv.mediaCache, mediaId);
     if(info == null || info.illustType == 2)
         return;
+
+    // Another work or page may have been shown while the info loaded.
+    if(shownPage != null && mediaId != lastMangaMediaId)
+        return;
     if(ppixiv.muting?.anyTagMuted?.(info.tagList) || ppixiv.muting?.isUserIdMuted?.(info.userId))
+        return;
+    if(shownPage != null && !await waitForShownPage(info.getMainImageUrl(shownPage).url))
         return;
 
     for(const page of pages)
@@ -746,10 +885,73 @@ async function prefetchPages(mediaId, pages)
             prefetchUrl(info.getMainImageUrl(page).url);
 }
 
+// An image outside the page that loads the page on screen.  It shares the viewer's request for
+// the same URL, so it costs nothing.  It's dropped when another page is shown, which ends the
+// wait.
+let shownPageLoader = null;
+
+// Resolve to true once url has loaded, or false if it failed or another page was shown first.
+function waitForShownPage(url)
+{
+    if(!url || prefetched.has(url))
+        return Promise.resolve(true);
+    const loader = document.createElement("img");
+    shownPageLoader = loader;
+    return new Promise((resolve) => {
+        loader.onload = () => resolve(shownPageLoader == loader);
+        loader.onerror = () => resolve(false);
+        loader.src = url;
+    });
+}
+
+// Return true if hovering a work would request anything: its full info isn't loaded yet, or
+// its original or 540 preview isn't downloaded or downloading.
+function hoverWouldFetch(mediaId, page)
+{
+    const mediaCache = window.ppixiv?.mediaCache;
+    try {
+        const info = mediaCache?.getMediaInfoSync(mediaId);
+        if(info == null)
+            return true;
+        // Animations' originals aren't prefetched, see below.
+        const have = (url) => url == null || prefetched.has(url) || prefetching.has(url);
+        return (info.illustType != 2 && !have(info.getMainImageUrl(page).url)) ||
+            !have(mediaCache.getMediaInfoSync(mediaId, { full: false })?.previewUrls?.[page]);
+    } catch(e) {
+        return true;
+    }
+}
+
+// ppixiv's viewer loads the same originals and 540 previews.  Count those as downloaded too, so
+// hovering a work that was already viewed doesn't use up the limit.
+document.addEventListener("load", (e) => {
+    const url = e.target.currentSrc;
+    if(e.target.tagName == "IMG" && url?.startsWith("https://i.pximg.net/") && !url.includes("_webp/"))
+        prefetched.add(url);
+}, true);
+
+const HOVER_THUMB_SELECTOR = ".screen-search-container .thumbnail-box [data-media-id], .screen-search-container .thumbnail-box[data-media-id]";
+
+// Scrolling under a still mouse fires pointerover for whatever ends up under it, but not
+// pointermove.  So pointerover only cancels a pending hover, and the hover starts when the mouse
+// moves onto a thumbnail.
 document.addEventListener("pointerover", (e) => {
     if(!active || e.pointerType != "mouse")
         return;
-    const thumb = e.target.closest?.(".screen-search-container .thumbnail-box [data-media-id], .screen-search-container .thumbnail-box[data-media-id]");
+    const mediaId = e.target.closest?.(HOVER_THUMB_SELECTOR)?.dataset.mediaId ?? null;
+    if(mediaId == hoveredMediaId)
+        return;
+
+    hoveredMediaId = null;
+    if(hoverTimer != null)
+        cancelLater(hoverTimer);
+    hoverTimer = null;
+}, true);
+
+document.addEventListener("pointermove", (e) => {
+    if(!active || e.pointerType != "mouse")
+        return;
+    const thumb = e.target.closest?.(HOVER_THUMB_SELECTOR);
     const mediaId = thumb?.dataset.mediaId ?? null;
     if(mediaId == hoveredMediaId)
         return;
@@ -768,25 +970,34 @@ document.addEventListener("pointerover", (e) => {
             return;
 
         // Muted works show a placeholder.  Don't download what the user chose not to see.
-        if(thumb.closest(".thumbnail-box")?.classList.contains("muted") || !takeHoverPrefetch())
+        // Hovers that would request nothing don't count towards the limit.
+        if(thumb.closest(".thumbnail-box")?.classList.contains("muted") || !hoverWouldFetch(mediaId, parsed.page) ||
+            !takeHoverPrefetch())
             return;
+
+        let partialInfo = null;
+        try {
+            partialInfo = window.ppixiv?.mediaCache?.getMediaInfoSync(mediaId, { full: false });
+        } catch(e) {
+        }
 
         // ppixiv can often guess the original's URL from the thumbnail without waiting for
         // the info request (it needs a few earlier works by the same artist to know the file
-        // type).  Start that right away, and fetch the info in parallel.
-        window.ppixiv?.guessImageUrl?.guessUrl(mediaId).then((url) => {
-            if(url && hoveredMediaId == mediaId)
-                prefetchUrl(url);
-        }).catch(() => {});
+        // type).  Start that right away, and fetch the info in parallel.  Animations play from
+        // a ZIP, and the "original" guessUrl returns for one is its first frame, which the
+        // viewer doesn't use.
+        if(partialInfo != null && partialInfo.illustType != 2)
+        {
+            window.ppixiv?.guessImageUrl?.guessUrl(mediaId).then((url) => {
+                if(url && hoveredMediaId == mediaId)
+                    prefetchUrl(url);
+            }).catch(() => {});
+        }
         prefetchPages(mediaId, [parsed.page]).catch(() => {});
 
         // The viewer shows ppixiv's 540 thumbnail while the original loads.  Search results
         // now load larger thumbnails instead (see "sharper thumbnails"), so fetch it too.
-        try {
-            const info = window.ppixiv?.mediaCache?.getMediaInfoSync(mediaId, { full: false });
-            prefetchUrl(info?.previewUrls?.[parsed.page]);
-        } catch(e) {
-        }
+        prefetchUrl(partialInfo?.previewUrls?.[parsed.page]);
     }, HOVER_DELAY_MS);
 }, true);
 
@@ -797,13 +1008,26 @@ function prefetchUpcomingMangaPages()
         return;
     lastMangaMediaId = mediaId;
 
+    // Stop waiting for the page that was shown before.
+    if(shownPageLoader != null)
+    {
+        shownPageLoader.src = "";
+        shownPageLoader = null;
+    }
+
     const parsed = parseMediaId(mediaId);
     if(parsed == null)
         return;
+
+    // Follow ppixiv's "Preload manga" setting.  "Thumbnails only" preloads no other pages, and
+    // "Nearby pages" only preloads the next one.  ppixiv defaults to thumbnails only on mobile.
+    const mode = window.ppixiv?.settings?.get?.("preload_manga");
+    if(mode == "thumbnails")
+        return;
     const pages = [];
-    for(let i = 1; i <= MANGA_PAGES_AHEAD; ++i)
+    for(let i = 1; i <= (mode == "partial" ? 1 : MANGA_PAGES_AHEAD); ++i)
         pages.push(parsed.page + i);
-    prefetchPages(mediaId, pages).catch(() => {});
+    prefetchPages(mediaId, pages, parsed.page).catch(() => {});
 }
 
 // ------------------------------------------------------------------ sharper thumbnails
@@ -820,12 +1044,14 @@ function prefetchUpcomingMangaPages()
 //
 // Each thumbnail gets the cheapest one that covers its size on screen in device pixels.  The
 // first choice is made when ppixiv sets the URL, from the size ppixiv plans for the thumbnail,
-// so the 540 image is never downloaded.  A ResizeObserver then upgrades thumbnails that end up
-// larger: the layout stretches short rows, and the thumbnail size slider and browser zoom change
-// sizes later.  Upgrades load in the background and replace the image once decoded.
+// so the 540 image is never downloaded, except in the manga view (see inMangaView).  A
+// ResizeObserver then upgrades thumbnails that end up larger when the layout stretches short
+// rows.  Upgrades load in the background and replace the image once decoded.  The size slider,
+// Ctrl+wheel, the window size and browser zoom make ppixiv rebuild the thumbnails instead, and
+// the new ones start from a size that already loaded (see shownThumbTier).
 //
 // The tiers allowed depend on how long recent thumbnails took to download, so a slow connection
-// falls back to smaller files.  "Save data" in the browser always uses the smallest tier.
+// falls back to smaller files.  With "save data" on in the browser, ppixiv's own 540 is kept.
 const THUMB_QUALITY_KEY = "ppx-zh-thumb-quality"; // "auto" (default) or "off"
 const THUMB_TIERS = [
     { spec: "600x1200_90_webp", box: [600, 1200] },
@@ -848,6 +1074,7 @@ const THUMB_MAX_FAILURES = 5;
 const thumbStates = new WeakMap(); // img -> { base, prefix, path, mediaId, tier, upgrading, failed }
 const thumbTimings = []; // { start, end } of recent thumbnail downloads
 const failedThumbUrls = new Set(); // Keep failures when ppixiv rebuilds thumbnail elements.
+const loadedThumbTiers = new Map(); // base URL -> Set of tiers that finished loading
 let thumbLoadMs = null;
 let thumbFailures = 0;
 
@@ -856,10 +1083,11 @@ function thumbsEnabled()
     return localStorage.getItem(THUMB_QUALITY_KEY) != "off" && thumbFailures < THUMB_MAX_FAILURES;
 }
 
+// Tiers that may be used now, from smallest to largest.  Empty means keep ppixiv's 540.
 function allowedThumbTiers()
 {
     if(saveData())
-        return [0];
+        return [];
     if(thumbLoadMs == null || thumbLoadMs < THUMB_SLOW_MS)
         return [0, 2];
     if(thumbLoadMs < THUMB_VERY_SLOW_MS)
@@ -876,6 +1104,8 @@ function thumbUrl(state, tier)
 function pickThumbTier(mediaId, cssWidth, cssHeight)
 {
     const allowed = allowedThumbTiers();
+    if(allowed.length == 0)
+        return THUMB_BASE;
     if(!(cssWidth > 0 && cssHeight > 0))
         return allowed[0];
 
@@ -918,9 +1148,57 @@ function pickThumbTier(mediaId, cssWidth, cssHeight)
 const imgSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
 const setImgSrc = (img, url) => imgSrc.set.call(img, url);
 
+// ppixiv zooms square thumbnails to 125% while the mouse isn't over them (--zoom-thumb in its
+// main.scss).  Layout sizes leave the zoom out and getBoundingClientRect includes it, so layout
+// sizes are scaled by this.  Otherwise the IntersectionObserver would pick a larger size than
+// the one already loading, and every thumbnail would download twice.  This follows ppixiv's
+// updateFromSettings.  Its settings are read rather than the body class it sets, because
+// changing the thumbnail style rebuilds the thumbnails before the class changes.
+const canHover = window.matchMedia("(hover: hover)");
+function thumbZoom()
+{
+    const ppixiv = window.ppixiv;
+    if(!canHover.matches || ppixiv?.mobile)
+        return 1;
+    if(typeof ppixiv?.settings?.get == "function")
+        return ppixiv.settings.get("thumbnail_style") == "aspect" || ppixiv.settings.get("disable_thumbnail_zooming") ? 1 : 1.25;
+    return document.body?.classList.contains("disable-thumbnail-zooming") === false ? 1.25 : 1;
+}
+
+function thumbTierLoaded(state, tier)
+{
+    return loadedThumbTiers.get(state.base)?.has(tier) == true;
+}
+
+function markThumbTierLoaded(state, tier)
+{
+    let tiers = loadedThumbTiers.get(state.base);
+    if(tiers == null)
+        loadedThumbTiers.set(state.base, tiers = new Set());
+    tiers.add(tier);
+}
+
+// The tier to show at once for a thumbnail that wants `wanted`.  ppixiv rebuilds thumbnails
+// when their size changes, and the new elements would stay blank while a new size downloads.
+// If another tier of the work has already loaded, show that instead: a larger one as it is, or a
+// smaller one until the wanted tier has loaded in the background.
+function shownThumbTier(state, wanted)
+{
+    const tiers = loadedThumbTiers.get(state.base);
+    if(tiers == null || tiers.has(wanted))
+        return wanted;
+    return Math.max(...tiers);
+}
+
+// In the manga view, ppixiv loads each page's 540 thumbnail to learn its aspect ratio before it
+// creates the thumbnails, so those URLs are already downloaded.  Swapping them would leave the
+// thumbnails blank until a different file downloads, so keep them and upgrade in the background.
+const inMangaView = () => window.ppixiv?.app?.currentDataSource?.name == "manga";
+
 const thumbResizeObserver = new ResizeObserver((entries) => {
+    const zoom = thumbZoom();
     for(const entry of entries)
-        maybeUpgradeThumb(entry.target, entry.contentRect.width, entry.contentRect.height);
+        maybeUpgradeThumb(entry.target, entry.contentRect.width * zoom, entry.contentRect.height * zoom);
 });
 
 function trackThumb(img, url)
@@ -974,7 +1252,7 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
         if(active && this.classList.contains("thumb") && thumbsEnabled())
         {
             const state = trackThumb(this, String(value));
-            if(state != null && !state.failed)
+            if(state != null && !state.failed && !inMangaView())
             {
                 // At this point ppixiv has only decided the size it wants for the thumbnail.
                 // It adds the thumbnail to a row right after, in the same task, and stretches
@@ -982,12 +1260,23 @@ Object.defineProperty(HTMLImageElement.prototype, "src", {
                 // sends the request.  ppixiv waits for the image to load right after setting
                 // it, so the src can't be left empty until then.
                 const box = this.closest(".thumbnail-box");
-                state.tier = pickThumbTier(state.mediaId, box.origWidth, box.origHeight);
+                const zoom = thumbZoom();
+                state.tier = shownThumbTier(state, pickThumbTier(state.mediaId, box.origWidth * zoom, box.origHeight * zoom));
                 value = thumbUrl(state, state.tier);
                 queueMicrotask(() => {
                     if(thumbStates.get(this) != state || state.failed || !thumbsEnabled() || box.currentWidth == null)
                         return;
-                    const tier = pickThumbTier(state.mediaId, box.currentWidth, box.currentHeight);
+                    const width = box.currentWidth * zoom, height = box.currentHeight * zoom;
+
+                    // A file that loaded before stays on screen, and a larger one loads in the
+                    // background.
+                    if(thumbTierLoaded(state, state.tier))
+                    {
+                        maybeUpgradeThumb(this, width, height);
+                        return;
+                    }
+
+                    const tier = pickThumbTier(state.mediaId, width, height);
                     if(tier > state.tier)
                     {
                         state.tier = tier;
@@ -1009,6 +1298,7 @@ function upgradeThumb(img, state, tier)
     const loader = document.createElement("img");
     loader.decoding = "async";
     loader.onload = async () => {
+        markThumbTierLoaded(state, tier);
         await loader.decode().catch(() => {});
         if(thumbStates.get(img) != state || state.upgrading != tier)
             return;
@@ -1021,15 +1311,28 @@ function upgradeThumb(img, state, tier)
     loader.onerror = () => {
         if(state.upgrading == tier)
             state.upgrading = null;
-        thumbFailed(state);
+        thumbFailed(state, url);
     };
     setImgSrc(loader, url);
 }
 
+// Load url in an image outside the page, and call done(true) if it loads or done(false).
+function loadDetached(url, done)
+{
+    const loader = document.createElement("img");
+    loader.onload = () => done(true);
+    loader.onerror = () => done(false);
+    setImgSrc(loader, url);
+}
+
 // Stop trying larger sizes for an image once one fails, so scrolling it back into view doesn't
-// try again.  Failures while offline aren't Pixiv's fault, so they don't count towards turning
-// the feature off.
-function thumbFailed(state)
+// try again.  The failure only counts towards turning the feature off if the connection isn't
+// to blame: a request for ppixiv's 540 has to get through, and then url has to fail a second
+// time.  An error event
+// can't tell a refused size from a dropped connection, and one connection reset can fail a
+// whole page of thumbnails at once.  When the connection was to blame, the image is forgotten,
+// and gets larger sizes again once the observers see it or ppixiv rebuilds it.
+function thumbFailed(state, url)
 {
     if(state.failed)
         return;
@@ -1037,9 +1340,27 @@ function thumbFailed(state)
     if(failedThumbUrls.has(state.base))
         return;
     failedThumbUrls.add(state.base);
-    if(navigator.onLine !== false)
-        thumbFailures++;
+
+    const forget = () => {
+        failedThumbUrls.delete(state.base);
+        state.failed = false;
+    };
+
+    // Ask the network whether it's up.  Loading the 540 in an image isn't enough, since it can
+    // come from the cache while offline.  A no-cors fetch resolves for any HTTP response and
+    // rejects only when the request didn't get through.  ppixiv replaces fetch and keeps the
+    // original as realFetch.
+    Promise.resolve()
+        .then(() => (window.realFetch ?? window.fetch)(state.base, { mode: "no-cors", cache: "no-store", credentials: "omit" }))
+        .then(() => loadDetached(url, (ok) => ok || navigator.onLine === false ? forget() : thumbFailures++), forget);
 }
+
+// Remember which tiers have loaded, for shownThumbTier.
+document.addEventListener("load", (e) => {
+    const state = thumbStates.get(e.target);
+    if(state != null && e.target.currentSrc == thumbUrl(state, state.tier))
+        markThumbTierLoaded(state, state.tier);
+}, true);
 
 // If Pixiv refuses one of these sizes for some image, go back to ppixiv's URL.
 document.addEventListener("error", (e) => {
@@ -1047,15 +1368,19 @@ document.addEventListener("error", (e) => {
     const state = thumbStates.get(img);
     if(state == null || state.tier == THUMB_BASE || img.currentSrc != thumbUrl(state, state.tier))
         return;
-    thumbFailed(state);
+    thumbFailed(state, img.currentSrc);
     state.tier = THUMB_BASE;
     state.upgrading = null;
     setImgSrc(img, state.base);
 
     // ppixiv learns aspect ratios from thumbnails as they load, and recorded 0 for the failed
     // one.  The manga view and the image viewer lay pages out with it, so measure again once
-    // ppixiv's own thumbnail has loaded.
-    window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
+    // ppixiv's own thumbnail has loaded.  Measuring now doesn't work: ppixiv's listeners would
+    // see the error that is still being dispatched and record 0 again.
+    img.addEventListener("load", () => {
+        if(thumbStates.get(img) == state && img.currentSrc == state.base)
+            window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
+    }, { once: true });
 }, true);
 
 // Estimate how long one thumbnail takes to download with the connection to itself.  A
@@ -1083,7 +1408,7 @@ function updateThumbLoadMs()
 }
 
 new PerformanceObserver((list) => {
-    const maxBefore = Math.max(...allowedThumbTiers());
+    const maxBefore = Math.max(THUMB_BASE, ...allowedThumbTiers());
     let changed = false;
     for(const entry of list.getEntries())
     {
@@ -1101,14 +1426,20 @@ new PerformanceObserver((list) => {
     if(changed)
         updateThumbLoadMs();
 
-    // When the connection gets faster, thumbnails loaded while it was slow are still small.
-    if(Math.max(...allowedThumbTiers()) > maxBefore)
+    // When the connection gets faster, thumbnails loaded while it was slow are still smaller or
+    // lower quality.
+    if(Math.max(THUMB_BASE, ...allowedThumbTiers()) > maxBefore)
         upgradeVisibleThumbs();
 }).observe({ type: "resource" });
 
 function maybeUpgradeThumb(img, width, height)
 {
     const state = thumbStates.get(img);
+
+    // A thumbnail ppixiv rebuilt while a failure was being confirmed copied the failure, and the
+    // confirmation may have cleared it since.
+    if(state?.failed && !failedThumbUrls.has(state.base))
+        state.failed = false;
     if(state == null || state.failed || !active || !img.isConnected || !thumbsEnabled())
         return;
     const tier = pickThumbTier(state.mediaId, width, height);
@@ -1146,6 +1477,17 @@ function upgradeVisibleThumbs()
     }
 }
 
+// Moving the window to a screen with a different scale changes devicePixelRatio without
+// changing any CSS size, so neither observer notices.
+function watchPixelRatio()
+{
+    window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener("change", () => {
+        watchPixelRatio();
+        upgradeVisibleThumbs();
+    }, { once: true });
+}
+watchPixelRatio();
+
 // Thumbnails created before the script activated still have ppixiv's URLs.  Hand them to the
 // ResizeObserver, which upgrades them.
 function trackExistingThumbs()
@@ -1159,20 +1501,18 @@ function trackExistingThumbs()
 
 // ------------------------------------------------------------------ activation (continued)
 
+// Features that look for their part of ppixiv's UI on activation and after every DOM change.
+const SETUPS = [ensureStyle, installFetchHook, setupChineseTags, setupThemeButton, setupBookmarkDownloadButton,
+    setupSimilarButton, setupDiscoveryTypeButtons];
+
 function activate()
 {
     active = true;
-    applyTheme();
-    ensureStyle();
+    runSetup(applyTheme);
     document.documentElement.classList.add(ON_CLASS);
     processTree(document.body);
-    installFetchHook();
-    setupChineseTags();
-    setupThemeButton();
-    setupBookmarkDownloadButton();
-    setupSimilarButton();
-    setupDiscoveryTypeButtons();
-    trackExistingThumbs();
+    SETUPS.forEach(runSetup);
+    runSetup(trackExistingThumbs);
     new MutationObserver(translateTitle).observe(document.head, { subtree: true, childList: true, characterData: true });
     translateTitle();
 }
@@ -1180,7 +1520,11 @@ function activate()
 const observer = new MutationObserver((mutations) => {
     // ppixiv sets up realFetch before it builds its UI, so hook it as early as possible.  The
     // first requests then ask for Chinese tag translations too.
-    installFetchHook();
+    runSetup(installFetchHook);
+
+    // ppixiv also translates the first search's title before its UI exists, so wrap the tag
+    // lookups as soon as ppixiv creates them.
+    runSetup(setupChineseTags);
 
     if(!active)
     {
@@ -1189,13 +1533,8 @@ const observer = new MutationObserver((mutations) => {
         return;
     }
 
-    ensureStyle();
-    setupChineseTags();
-    setupThemeButton();
-    setupBookmarkDownloadButton();
-    setupSimilarButton();
-    setupDiscoveryTypeButtons();
-    prefetchUpcomingMangaPages();
+    SETUPS.forEach(runSetup);
+    runSetup(prefetchUpcomingMangaPages);
     for(const mutation of mutations)
     {
         if(mutation.type == "childList")
@@ -1229,14 +1568,17 @@ observer.observe(document, {
     attributeFilter: ATTRS,
 });
 
-// Translate the browser tab title too ("Rankings - ppixiv" and similar).
+// Translate the browser tab title too ("Rankings - ppixiv" and similar).  On a user's page the
+// title is the user's name, which is left alone.
 function translateTitle()
 {
     if(!active)
         return;
     const title = document.title;
     const match = title.match(/^(.*?)( - ppixiv)?$/);
-    const translated = match && translateString(match[1]);
+    if(match == null || match[1] == window.ppixiv?.app?.currentDataSource?.userInfo?.name)
+        return;
+    const translated = translateString(match[1]);
     if(translated != null)
         document.title = translated + (match[2] ?? "");
 }

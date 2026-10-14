@@ -26,6 +26,19 @@ eq(translate('Downloading 12 pages...'), '正在下载 12 页…', 'multi-page d
 eq(translate('3 hours ago'), '3 小时前', 'relative time');
 eq(translate('Followed users'), '已关注用户', 'dictionary entries win over patterns');
 eq(translate('原神'), null, 'text without Latin letters is left alone');
+eq(translate('1234 Private Bookmarks / 原神'), '1234 个非公开收藏 / 原神', 'bookmarks heading keeps the tag');
+eq(translate('1 Bookmark / untagged'), '1 个收藏 / 未分类', 'bookmarks heading for untagged');
+eq(translate('Public Bookmarks'), '公开收藏', 'bookmarks heading before the count loads');
+eq(translate('24 frames'), '24 帧', 'ugoira frame count');
+eq(translate('2 years'), '2 年前', 'time filter button after picking "2 years ago"');
+eq(translate('Suggestions for gen'), '「gen」的建议', 'autocomplete header');
+eq(translate('Clear 1 recent search?'), '清除 1 条最近搜索？', 'clear recent searches');
+eq(translate('This group contains 3 tags.'), '此分组包含 3 个标签。', 'first line of the delete group prompt');
+eq(translate("                        Delete this group and all tags inside it?  This can't be undone."), '删除此分组及其中的所有标签？此操作无法撤销。', 'second line of the delete group prompt');
+eq(translate('Artist: Alice'), '作者：Alice', 'mobile artist row');
+eq(translate('AI-generated'), 'AI 生成', 'AI tag row');
+eq(translate('by the sea'), null, 'a title starting with "by" is left alone');
+eq([translate('Horizontal'), translate('Vertical')], ['横排', '竖排'], 'image translation text direction');
 
 // pickTagTranslation
 const pick = new Function(constLine('KANA_RE') + constLine('HAN_RE') + grab('pickTagTranslation') + '; return pickTagTranslation;')();
@@ -45,11 +58,16 @@ eq(Math.round(thumb.run(parallel)), 40, '40 parallel 1.6 s downloads count as 40
 const serial = Array.from({ length: 10 }, (_, i) => ({ start: i * 1000, end: i * 1000 + 800 }));
 eq(Math.round(thumb.run(serial)), 800, 'serial 800 ms downloads stay 800 ms');
 
-// fetchFilteredDiscovery
+// fetchFilteredDiscovery.  known is what ppixiv's data source already shows, filterType is the
+// type selected now, and where is the page's location.
 const messages = [];
-const fd = new Function('window', 'later', constLine('DISCOVERY_MAX_REQUESTS') + constLine('DISCOVERY_RETRY_DELAY_MS') +
+let known = [], filterType = null;
+const where = { pathname: '/discovery', search: '' };
+const filterDiscovery = new Function('window', 'later', 'discoveryType', 'location', constLine('DISCOVERY_MAX_REQUESTS') + constLine('DISCOVERY_RETRY_DELAY_MS') +
   src.match(/^const DISCOVERY_TYPES = \[[\s\S]*?\];/m)[0] + grab('fetchFilteredDiscovery') + '; return fetchFilteredDiscovery;')(
-  { ppixiv: { message: { show: (m) => messages.push(m) } } }, (cb) => setTimeout(cb, 0));
+  { ppixiv: { message: { show: (m) => messages.push(m) }, app: { currentDataSource: { idList: { getAllMediaIds: () => known } } } } },
+  (cb) => setTimeout(cb, 0), () => filterType, where);
+const fd = (fetchFunc, url, init, type) => { filterType = type; return filterDiscovery(fetchFunc, url, init, type); };
 const page = (types, extra = {}) => new Response(JSON.stringify({ error: false, body: { thumbnails: { illust: types.map((t, i) => ({ id: String(extra.base + i), illustType: t })) }, tagTranslation: extra.tt ?? {} } }), { status: 200 });
 let calls = 0;
 let res = await fd(async () => (++calls, page([0, 1, 2, 0], { base: 100 })), '/ajax/discovery/artworks', {}, 'illust');
@@ -68,6 +86,106 @@ console.log(messages[0]);
 calls = 0;
 res = await fd(async () => (++calls, new Response('oops', { status: 500 })), '/ajax/discovery/artworks', {}, 'manga');
 eq([calls, res.status], [1, 500], 'first-request errors go to ppixiv unchanged');
+calls = 0;
+messages.length = 0;
+res = await fd(async () => ++calls == 1 ? page([0, 0], { base: 1 }) : new Response('slow down', { status: 429 }), '/ajax/discovery/artworks', {}, 'manga');
+eq([calls, res.status, messages.length], [2, 429, 0], 'a failed retry goes to ppixiv without the "no works" message');
+calls = 0;
+known = ['illust:2-0'];
+const repeats = [[1], [1, 1]];
+res = await fd(async () => page(repeats[calls], { base: 2 + 7 * calls++ }), '/ajax/discovery/artworks', {}, 'manga');
+body = await res.json();
+eq([calls, body.body.thumbnails.illust.map(t => t.id)], [2, ['9', '10']], 'works ppixiv already shows do not count as kept');
+known = [];
+calls = 0;
+messages.length = 0;
+res = await fd(async () => (++calls, filterType = 'illust', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
+body = await res.json();
+eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 2, 0], 'a type switch stops the retries, and ppixiv gets the batch unfiltered');
+calls = 0;
+res = await fd(async () => (++calls, where.pathname = '/new_illust.php', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
+where.pathname = '/discovery';
+body = await res.json();
+eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 2, 0], 'leaving the page stops the retries without ending the feed or the message');
+
+// getMediaInfoForPrefetch: a failed request isn't remembered, but Pixiv's own errors are.
+const infoForPrefetch = new Function(grab('getMediaInfoForPrefetch') + '; return getMediaInfoForPrefetch;')();
+const cacheFailing = (message) => {
+  const cache = { _nonexistantMediaIds: { 'illust:5-0': 'deleted' } };
+  cache.getMediaInfo = async (id) => { cache._nonexistantMediaIds[id.replace(/^illust:(\d+).*$/, 'illust:$1-0')] = message; return null; };
+  return cache;
+};
+let mc = cacheFailing('Invalid response');
+await infoForPrefetch(mc, 'illust:7-2');
+eq(Object.keys(mc._nonexistantMediaIds), ['illust:5-0'], 'a failed request is forgotten, other entries stay');
+mc = cacheFailing('429 Too Many Requests');
+await infoForPrefetch(mc, 'illust:7');
+eq(Object.keys(mc._nonexistantMediaIds), ['illust:5-0'], 'an HTML error page is forgotten');
+mc = cacheFailing('Artwork has been deleted');
+await infoForPrefetch(mc, 'illust:7-0');
+eq(Object.keys(mc._nonexistantMediaIds), ['illust:5-0', 'illust:7-0'], "Pixiv's own error is kept");
+
+// hoverWouldFetch
+const prefetchedUrls = new Set(['orig', 'preview']);
+const wouldFetch = (info) => new Function('window', 'prefetched', 'prefetching', grab('hoverWouldFetch') + '; return hoverWouldFetch;')(
+  { ppixiv: { mediaCache: { getMediaInfoSync: (id, { full = true } = {}) => full ? info : { previewUrls: ['preview'] } } } },
+  prefetchedUrls, new Map());
+const fullInfo = (url) => ({ getMainImageUrl: (page) => ({ url: page == 0 ? url : undefined }) });
+eq(wouldFetch(null)('illust:1-0', 0), true, 'hover fetches info that is not loaded');
+eq(wouldFetch(fullInfo('orig'))('illust:1-0', 0), false, 'hover with everything downloaded sends nothing');
+eq(wouldFetch(fullInfo('other'))('illust:1-0', 0), true, 'hover downloads a missing original');
+
+// prefetchUpcomingMangaPages follows ppixiv's "Preload manga" setting.
+// The pages ahead wait for the page on screen, which is passed as shownPage.
+const mangaPages = (mode) => {
+  const got = [];
+  new Function('window', 'prefetchPages', 'saveData', 'parseMediaId', 'MANGA_PAGES_AHEAD',
+    'let lastMangaMediaId = null, shownPageLoader = null;' + grab('prefetchUpcomingMangaPages') + '; prefetchUpcomingMangaPages();')(
+    { ppixiv: { app: { displayedMediaId: 'illust:1-3' }, settings: { get: () => mode } } },
+    async (id, pages, shownPage) => got.push(...pages, `after ${shownPage}`), () => false, () => ({ page: 3 }), 2);
+  return got;
+};
+eq([mangaPages('full'), mangaPages('partial'), mangaPages('thumbnails'), mangaPages(undefined)],
+  [[4, 5, 'after 3'], [4, 'after 3'], [], [4, 5, 'after 3']], 'manga prefetch per preload setting, after the page on screen');
+
+// prefetchPages with shownPage waits until the page on screen has loaded, and gives up when
+// another page is shown first.
+for(const shownAgain of [false, true])
+{
+  const fetched = [], loaders = [];
+  const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
+    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
+    '; return { prefetchPages, showAnother() { shownPageLoader = null; } };')(
+    { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: async () => ({ illustType: 0, mangaPages: [0, 1, 2, 3], getMainImageUrl: (p) => ({ url: `p${p}` }) }) } } },
+    { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
+    (url) => fetched.push(url), new Set(), () => ({ page: 0 }));
+  const done = env.prefetchPages('illust:1-0', [1, 2], 0);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const waiting = [fetched.length, loaders.map((l) => l.src)];
+  if(shownAgain)
+    env.showAnother();
+  loaders[0].onload();
+  await done;
+  eq([waiting, fetched], [[0, ['p0']], shownAgain ? [] : ['p1', 'p2']],
+    shownAgain ? 'read-ahead is dropped when another page is shown first' : 'read-ahead starts after the page on screen loads');
+}
+
+// A read-ahead whose info arrives after another work is shown does nothing.
+{
+  const fetched = [], loaders = [];
+  let resolveInfo;
+  const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
+    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
+    '; return { prefetchPages, show(id) { lastMangaMediaId = id; } };')(
+    { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: () => new Promise((resolve) => resolveInfo = resolve) } } },
+    { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
+    (url) => fetched.push(url), new Set(), () => ({ page: 0 }));
+  const done = env.prefetchPages('illust:1-0', [1, 2], 0);
+  env.show('illust:2-0');
+  resolveInfo({ illustType: 0, mangaPages: [0, 1, 2], getMainImageUrl: (p) => ({ url: `p${p}` }) });
+  await done;
+  eq([loaders.length, fetched], [0, []], 'a read-ahead for a work no longer shown does nothing');
+}
 
 // pixivAjaxUrl
 const ajax = new Function('location', grab('pixivAjaxUrl') + '; return pixivAjaxUrl;')({ href: 'https://www.pixiv.net/discovery', origin: 'https://www.pixiv.net' });
