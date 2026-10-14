@@ -9,7 +9,8 @@ const section = src.slice(
 );
 
 // zoom: ppixiv zooms square thumbnails.  dataSource: the name of ppixiv's current data source.
-function runtime({ zoom = false, dataSource = 'search' } = {})
+// saveData: the browser's "save data" mode.
+function runtime({ zoom = false, dataSource = 'search', saveData = false } = {})
 {
   const requests = [], loaders = [], microtasks = [], events = new Map(), registered = [];
   const storage = new Map();
@@ -44,7 +45,7 @@ function runtime({ zoom = false, dataSource = 'search' } = {})
   };
   const window = {
     devicePixelRatio: 1,
-    matchMedia: () => ({ matches: zoom }),
+    matchMedia: () => ({ matches: zoom, addEventListener() {} }),
     ppixiv: {
       app: { currentDataSource: { name: dataSource } },
       mediaCache: { getMediaInfoSync: () => ({ width: 2000, height: 1000 }), getImageDimensions: (info) => info },
@@ -53,7 +54,7 @@ function runtime({ zoom = false, dataSource = 'search' } = {})
   };
   const hooks = new Function('window', 'document', 'localStorage', 'navigator', 'HTMLImageElement',
     'ResizeObserver', 'IntersectionObserver', 'PerformanceObserver', 'queueMicrotask',
-    `let active = true; const saveData = () => false;
+    `let active = true; const saveData = () => ${saveData};
     ${section}
     return { resize: thumbResizeObserver.callback, visibility: thumbVisibilityObserver.callback,
       enabled: thumbsEnabled, get failures() { return thumbFailures; } };`)(
@@ -71,6 +72,8 @@ function runtime({ zoom = false, dataSource = 'search' } = {})
       return img;
     },
     fail(img) { events.get('error')({ target: img }); },
+    // The browser finished loading img's current URL.
+    loaded(img) { events.get('load')({ target: img }); },
     // Fire the load listeners ppixiv-zh added to img.
     load(img) { for(const { name, callback } of img.listeners.splice(0)) if(name == 'load') callback(); },
     // Finish the detached loads that are running now.
@@ -209,3 +212,34 @@ assert.equal(manga.loaders.length, 1, 'upgraded in the background');
 await manga.loaders[0].onload();
 assert.match(page.src, /_webp/);
 console.log('ok   Manga view keeps the downloaded 540 until the upgrade loads');
+
+// ppixiv rebuilds thumbnails when their size changes.  A rebuilt thumbnail starts from a size
+// that already loaded, and the wanted size loads in the background.
+const rebuilds = runtime();
+const small = rebuilds.create(9, { width: 300 });
+assert.match(small.src, /600x1200_90_webp/);
+rebuilds.loaded(small);
+const grown = rebuilds.create(9, { width: 900, currentWidth: 900 });
+assert.match(grown.src, /600x1200_90_webp/, 'the loaded size is shown at once');
+rebuilds.flush();
+assert.equal(rebuilds.loaders.length, 1);
+assert.match(rebuilds.loaders[0].url, /1200x1200_90_webp/, 'the wanted size loads in the background');
+await rebuilds.loaders[0].onload();
+assert.match(grown.src, /1200x1200_90_webp/);
+const larger = runtime();
+larger.loaded(larger.create(10, { width: 900 }));
+const shrunk = larger.create(10, { width: 300, currentWidth: 300 });
+larger.flush();
+assert.match(shrunk.src, /1200x1200_90_webp/, 'a larger size that loaded is kept when shrinking');
+assert.equal(larger.loaders.length, 0);
+console.log('ok   Rebuilt thumbnails start from a size that already loaded');
+
+// Save data keeps ppixiv's own 540, which is the smallest file.
+const saving = runtime({ saveData: true });
+const kept = saving.create(11, { width: 900, currentWidth: 900 });
+saving.flush();
+saving.resize(kept);
+saving.enter(kept);
+assert.match(kept.src, /540x540_70/);
+assert.equal(saving.loaders.length, 0);
+console.log('ok   Save data keeps ppixiv\'s thumbnails');

@@ -340,8 +340,13 @@ html.ppx-zh .screen-search-container .data-source-ui > div:has(> .pz-discovery-t
     gap: 0.5em 1.2em;
 }
 
+/* ppixiv clips the title to 2em and shows the rest on hover over a --ui-bg-color band.  That
+ * band would show as a box on the translucent header, so only the lines below the clip get a
+ * backing, which keeps a wrapped title from being drawn over the toolbar icons.  The row has the
+ * container's font size, so 2em here is the clip line. */
 html.ppx-zh .title-with-button-row-container:hover .title-with-button-row {
-    background: transparent;
+    background: linear-gradient(transparent 2em, var(--pz-surface-solid) 2em);
+    border-radius: 0 0 8px 8px;
 }
 
 html.ppx-zh .avatar-widget .avatar,
@@ -598,10 +603,13 @@ html.ppx-zh .popup-context-menu .button-strip .button:not(.enabled) {
 }
 
 /* The like button is replaced with "similar works", which works whether or not the image was
- * liked.  ppixiv drops .enabled and adds .liked after a like, so style it the same either way. */
+ * liked.  ppixiv drops .enabled and adds .liked after a like, so style it the same either way.
+ * ppixiv also moves the like face up when liked or hovered, through these variables. */
 html.ppx-zh .popup-context-menu .button-strip .button.pz-similar {
     color: var(--pz-menu-button-text);
     background-color: var(--pz-menu-button);
+    --overall-translate-x: 0;
+    --overall-translate-y: 0;
 }
 
 html.ppx-zh .popup-context-menu .button.button-like.pz-similar > svg {

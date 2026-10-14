@@ -38,6 +38,7 @@ eq(translate("                        Delete this group and all tags inside it? 
 eq(translate('Artist: Alice'), '作者：Alice', 'mobile artist row');
 eq(translate('AI-generated'), 'AI 生成', 'AI tag row');
 eq(translate('by the sea'), null, 'a title starting with "by" is left alone');
+eq([translate('Horizontal'), translate('Vertical')], ['横排', '竖排'], 'image translation text direction');
 
 // pickTagTranslation
 const pick = new Function(constLine('KANA_RE') + constLine('HAN_RE') + grab('pickTagTranslation') + '; return pickTagTranslation;')();
@@ -57,13 +58,16 @@ eq(Math.round(thumb.run(parallel)), 40, '40 parallel 1.6 s downloads count as 40
 const serial = Array.from({ length: 10 }, (_, i) => ({ start: i * 1000, end: i * 1000 + 800 }));
 eq(Math.round(thumb.run(serial)), 800, 'serial 800 ms downloads stay 800 ms');
 
-// fetchFilteredDiscovery.  known is what ppixiv's data source already shows.
+// fetchFilteredDiscovery.  known is what ppixiv's data source already shows, filterType is the
+// type selected now, and where is the page's location.
 const messages = [];
-let known = [];
-const fd = new Function('window', 'later', constLine('DISCOVERY_MAX_REQUESTS') + constLine('DISCOVERY_RETRY_DELAY_MS') +
+let known = [], filterType = null;
+const where = { pathname: '/discovery', search: '' };
+const filterDiscovery = new Function('window', 'later', 'discoveryType', 'location', constLine('DISCOVERY_MAX_REQUESTS') + constLine('DISCOVERY_RETRY_DELAY_MS') +
   src.match(/^const DISCOVERY_TYPES = \[[\s\S]*?\];/m)[0] + grab('fetchFilteredDiscovery') + '; return fetchFilteredDiscovery;')(
   { ppixiv: { message: { show: (m) => messages.push(m) }, app: { currentDataSource: { idList: { getAllMediaIds: () => known } } } } },
-  (cb) => setTimeout(cb, 0));
+  (cb) => setTimeout(cb, 0), () => filterType, where);
+const fd = (fetchFunc, url, init, type) => { filterType = type; return filterDiscovery(fetchFunc, url, init, type); };
 const page = (types, extra = {}) => new Response(JSON.stringify({ error: false, body: { thumbnails: { illust: types.map((t, i) => ({ id: String(extra.base + i), illustType: t })) }, tagTranslation: extra.tt ?? {} } }), { status: 200 });
 let calls = 0;
 let res = await fd(async () => (++calls, page([0, 1, 2, 0], { base: 100 })), '/ajax/discovery/artworks', {}, 'illust');
@@ -93,6 +97,15 @@ res = await fd(async () => page(repeats[calls], { base: 2 + 7 * calls++ }), '/aj
 body = await res.json();
 eq([calls, body.body.thumbnails.illust.map(t => t.id)], [2, ['9', '10']], 'works ppixiv already shows do not count as kept');
 known = [];
+calls = 0;
+messages.length = 0;
+res = await fd(async () => (++calls, filterType = 'illust', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
+body = await res.json();
+eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 0, 0], 'a type switch stops the retries without the message');
+calls = 0;
+res = await fd(async () => (++calls, where.pathname = '/new_illust.php', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
+where.pathname = '/discovery';
+eq([calls, messages.length], [1, 0], 'leaving the page stops the retries without the message');
 
 // getMediaInfoForPrefetch: a failed request isn't remembered, but Pixiv's own errors are.
 const infoForPrefetch = new Function(grab('getMediaInfoForPrefetch') + '; return getMediaInfoForPrefetch;')();
@@ -122,15 +135,39 @@ eq(wouldFetch(fullInfo('orig'))('illust:1-0', 0), false, 'hover with everything 
 eq(wouldFetch(fullInfo('other'))('illust:1-0', 0), true, 'hover downloads a missing original');
 
 // prefetchUpcomingMangaPages follows ppixiv's "Preload manga" setting.
+// The pages ahead wait for the page on screen, which is passed as shownPage.
 const mangaPages = (mode) => {
   const got = [];
   new Function('window', 'prefetchPages', 'saveData', 'parseMediaId', 'MANGA_PAGES_AHEAD',
-    'let lastMangaMediaId = null;' + grab('prefetchUpcomingMangaPages') + '; prefetchUpcomingMangaPages();')(
+    'let lastMangaMediaId = null, shownPageLoader = null;' + grab('prefetchUpcomingMangaPages') + '; prefetchUpcomingMangaPages();')(
     { ppixiv: { app: { displayedMediaId: 'illust:1-3' }, settings: { get: () => mode } } },
-    async (id, pages) => got.push(...pages), () => false, () => ({ page: 3 }), 2);
+    async (id, pages, shownPage) => got.push(...pages, `after ${shownPage}`), () => false, () => ({ page: 3 }), 2);
   return got;
 };
-eq([mangaPages('full'), mangaPages('partial'), mangaPages('thumbnails'), mangaPages(undefined)], [[4, 5], [4], [], [4, 5]], 'manga prefetch per preload setting');
+eq([mangaPages('full'), mangaPages('partial'), mangaPages('thumbnails'), mangaPages(undefined)],
+  [[4, 5, 'after 3'], [4, 'after 3'], [], [4, 5, 'after 3']], 'manga prefetch per preload setting, after the page on screen');
+
+// prefetchPages with shownPage waits until the page on screen has loaded, and gives up when
+// another page is shown first.
+for(const shownAgain of [false, true])
+{
+  const fetched = [], loaders = [];
+  const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
+    'let shownPageLoader = null;' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
+    '; return { prefetchPages, showAnother() { shownPageLoader = null; } };')(
+    { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: async () => ({ illustType: 0, mangaPages: [0, 1, 2, 3], getMainImageUrl: (p) => ({ url: `p${p}` }) }) } } },
+    { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
+    (url) => fetched.push(url), new Set(), () => ({ page: 0 }));
+  const done = env.prefetchPages('illust:1-0', [1, 2], 0);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const waiting = [fetched.length, loaders.map((l) => l.src)];
+  if(shownAgain)
+    env.showAnother();
+  loaders[0].onload();
+  await done;
+  eq([waiting, fetched], [[0, ['p0']], shownAgain ? [] : ['p1', 'p2']],
+    shownAgain ? 'read-ahead is dropped when another page is shown first' : 'read-ahead starts after the page on screen loads');
+}
 
 // pixivAjaxUrl
 const ajax = new Function('location', grab('pixivAjaxUrl') + '; return pixivAjaxUrl;')({ href: 'https://www.pixiv.net/discovery', origin: 'https://www.pixiv.net' });
