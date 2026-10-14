@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ppixiv 中文与现代界面
 // @namespace    https://github.com/Stevey233/ppixiv-zh
-// @version      0.8.2
+// @version      0.8.3
 // @description  给 ppixiv 汉化界面和标签译名，换成现代化的深色或浅色主题。需要同时安装 ppixiv。
 // @author       Stevey233
 // @license      MIT
@@ -77,6 +77,7 @@ const DICT = {
     "User's follows": "用户的关注",
     "Users who bookmarked image": "收藏了此作品的用户",
     "Edited Images": "已编辑的图片",
+    "Edited": "已编辑",
     "Untagged bookmarks": "未分类的收藏",
     "Untagged": "未分类",
     "Muted Tags": "屏蔽的标签",
@@ -225,11 +226,13 @@ const DICT = {
     "Bookmark": "收藏",
     "Bookmark image": "收藏作品",
     "Bookmark privately": "非公开收藏",
+    "Bookmark folder": "收藏文件夹",
     "Remove bookmark": "取消收藏",
     "Remove bookmark?": "取消收藏？",
     "Public Bookmark": "公开收藏",
     "Private Bookmark": "非公开收藏",
     "Like image": "点赞",
+    "Already liked image": "已点赞",
     "More": "更多",
     "More...": "更多…",
     "Info": "信息",
@@ -459,11 +462,16 @@ const DICT = {
     "Already following this user": "已经关注了此用户",
     "Bookmark removed": "已取消收藏",
     "Bookmark edited": "已修改收藏",
+    "Bookmarked privately": "已非公开收藏",
+    "Bookmarked folder": "已收藏文件夹",
     "Already liked this image": "已经赞过了",
     "Illustration liked": "已点赞",
     "Unfollowed": "已取消关注",
     "Downloading video...": "正在下载视频…",
     "Downloading image...": "正在下载图片…",
+    "These settings will only affect this image, and aren't saved. Settings for all images can be changed from settings.": "这些设置只对这张图片生效，不会保存。所有图片的设置可以在设置里修改。",
+    "Previewing portrait": "正在预览竖版",
+    "Previewing landscape": "正在预览横版",
     "Loading...": "加载中…",
     "Saving...": "保存中…",
     "Path copied to clipboard": "路径已复制到剪贴板",
@@ -525,11 +533,17 @@ const PATTERNS = [
     [/^(.+)'s followed users$/, "$1 关注的用户"],
     [/^Similar artists to (.+)$/, "与 $1 相似的作者"],
     [/^Users who bookmarked (.+)$/, "收藏了 $1 的用户"],
-    [/^Followed (.+)$/, "已关注 $1"],
+    // ppixiv appends " privately" to the name: "Followed " + name + " privately".
+    [/^Followed (.+?)( privately)?$/, (m, name, priv) => `已${priv ? "非公开" : ""}关注 ${name}`],
+    [/^Now following (.+) (privately|publically)$/, (m, name, priv) => `已改为${priv == "privately" ? "非公开" : "公开"}关注 ${name}`],
+    [/^Unfollow (.+)\?$/, "取消关注 $1？"],
     [/^Unfollowed (.+)$/, "已取消关注 $1"],
-    [/^Added the tag (.+)$/, "已添加标签 $1"],
-    [/^Removed the tag (.+)$/, "已移除标签 $1"],
-    [/^Change bookmark to (.+)$/, "改为$1收藏"],
+    [/^Added the tag "(.+)" to (.+)$/, "已给 $2 添加关注标签「$1」"],
+    [/^Removed the tag "(.+)" from (.+)$/, "已从 $2 移除关注标签「$1」"],
+    [/^Change bookmark to (public|private)$/, (m, type) => type == "public" ? "改为公开收藏" : "改为非公开收藏"],
+    [/^Downloading (\d+) pages\.\.\.$/, "正在下载 $1 页…"],
+    [/^Previewing (\d+):(\d+)$/, "预览比例 $1:$2"],
+    [/^Error reading series: (.*)$/, "读取系列时出错：$1"],
     [/^Group "(.+)" deleted$/, "已删除分组「$1」"],
     [/^Group "(.+)" already exists$/, "分组「$1」已存在"],
     [/^Couldn't edit bookmark: (.+)$/, "无法修改收藏：$1"],
@@ -652,11 +666,7 @@ function processTree(root)
         return;
 
     if(root.nodeType == Node.ELEMENT_NODE)
-    {
-        translateAttributes(root);
-        if(root.classList.contains("checkbox"))
-            syncCheckbox(root);
-    }
+        processElement(root);
 
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
@@ -675,12 +685,17 @@ function processTree(root)
         if(node.nodeType == Node.TEXT_NODE)
             translateTextNode(node);
         else
-        {
-            translateAttributes(node);
-            if(node.classList.contains("checkbox"))
-                syncCheckbox(node);
-        }
+            processElement(node);
     }
+}
+
+function processElement(element)
+{
+    translateAttributes(element);
+    if(element.classList.contains("checkbox"))
+        syncCheckbox(element);
+    else if(element.tagName == "IMG" && thumbStates.has(element))
+        watchThumb(element);
 }
 
 function noteMissing(text, element)
@@ -1496,9 +1511,34 @@ function trackThumb(img, url)
 
     const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: failedThumbUrls.has(url) };
     thumbStates.set(img, state);
+    watchThumb(img);
+    return state;
+}
+
+function watchThumb(img)
+{
     thumbResizeObserver.observe(img);
     thumbVisibilityObserver.observe(img);
-    return state;
+}
+
+// The observers keep what they watch alive, so stop watching thumbnails ppixiv has thrown away.
+// ppixiv sometimes removes a thumbnail and puts it back in the same task while laying out rows,
+// so this is only called for thumbnails that are still detached when the mutation is delivered.
+function forgetThumb(img)
+{
+    thumbResizeObserver.unobserve(img);
+    thumbVisibilityObserver.unobserve(img);
+    visibleThumbs.delete(img);
+}
+
+function forgetRemovedThumbs(node)
+{
+    if(node.nodeType != Node.ELEMENT_NODE || node.isConnected)
+        return;
+    const imgs = node.tagName == "IMG" ? [node] : node.querySelectorAll("img.thumb");
+    for(const img of imgs)
+        if(thumbStates.has(img))
+            forgetThumb(img);
 }
 
 // ppixiv sets thumbnails with "thumb.src = url".  Swap the URL before the browser starts loading it.
@@ -1587,6 +1627,11 @@ document.addEventListener("error", (e) => {
     state.tier = THUMB_BASE;
     state.upgrading = null;
     setImgSrc(img, state.base);
+
+    // ppixiv learns aspect ratios from thumbnails as they load, and recorded 0 for the failed
+    // one.  The manga view and the image viewer lay pages out with it, so measure again once
+    // ppixiv's own thumbnail has loaded.
+    window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
 }, true);
 
 // Estimate how long one thumbnail takes to download with the connection to itself.  A
@@ -1733,6 +1778,8 @@ const observer = new MutationObserver((mutations) => {
         {
             for(const node of mutation.addedNodes)
                 processTree(node);
+            for(const node of mutation.removedNodes)
+                forgetRemovedThumbs(node);
             const target = mutation.target;
             if(target.nodeType == Node.ELEMENT_NODE && target.classList.contains("checkbox"))
                 syncCheckbox(target);

@@ -90,11 +90,7 @@ function processTree(root)
         return;
 
     if(root.nodeType == Node.ELEMENT_NODE)
-    {
-        translateAttributes(root);
-        if(root.classList.contains("checkbox"))
-            syncCheckbox(root);
-    }
+        processElement(root);
 
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
@@ -113,12 +109,17 @@ function processTree(root)
         if(node.nodeType == Node.TEXT_NODE)
             translateTextNode(node);
         else
-        {
-            translateAttributes(node);
-            if(node.classList.contains("checkbox"))
-                syncCheckbox(node);
-        }
+            processElement(node);
     }
+}
+
+function processElement(element)
+{
+    translateAttributes(element);
+    if(element.classList.contains("checkbox"))
+        syncCheckbox(element);
+    else if(element.tagName == "IMG" && thumbStates.has(element))
+        watchThumb(element);
 }
 
 function noteMissing(text, element)
@@ -934,9 +935,34 @@ function trackThumb(img, url)
 
     const state = { base: url, prefix: match[1], path: match[2], mediaId, tier: THUMB_BASE, upgrading: null, failed: failedThumbUrls.has(url) };
     thumbStates.set(img, state);
+    watchThumb(img);
+    return state;
+}
+
+function watchThumb(img)
+{
     thumbResizeObserver.observe(img);
     thumbVisibilityObserver.observe(img);
-    return state;
+}
+
+// The observers keep what they watch alive, so stop watching thumbnails ppixiv has thrown away.
+// ppixiv sometimes removes a thumbnail and puts it back in the same task while laying out rows,
+// so this is only called for thumbnails that are still detached when the mutation is delivered.
+function forgetThumb(img)
+{
+    thumbResizeObserver.unobserve(img);
+    thumbVisibilityObserver.unobserve(img);
+    visibleThumbs.delete(img);
+}
+
+function forgetRemovedThumbs(node)
+{
+    if(node.nodeType != Node.ELEMENT_NODE || node.isConnected)
+        return;
+    const imgs = node.tagName == "IMG" ? [node] : node.querySelectorAll("img.thumb");
+    for(const img of imgs)
+        if(thumbStates.has(img))
+            forgetThumb(img);
 }
 
 // ppixiv sets thumbnails with "thumb.src = url".  Swap the URL before the browser starts loading it.
@@ -1025,6 +1051,11 @@ document.addEventListener("error", (e) => {
     state.tier = THUMB_BASE;
     state.upgrading = null;
     setImgSrc(img, state.base);
+
+    // ppixiv learns aspect ratios from thumbnails as they load, and recorded 0 for the failed
+    // one.  The manga view and the image viewer lay pages out with it, so measure again once
+    // ppixiv's own thumbnail has loaded.
+    window.ppixiv?.extraCache?.registerLoadingThumbnail?.(state.mediaId, img)?.catch?.(() => {});
 }, true);
 
 // Estimate how long one thumbnail takes to download with the connection to itself.  A
@@ -1171,6 +1202,8 @@ const observer = new MutationObserver((mutations) => {
         {
             for(const node of mutation.addedNodes)
                 processTree(node);
+            for(const node of mutation.removedNodes)
+                forgetRemovedThumbs(node);
             const target = mutation.target;
             if(target.nodeType == Node.ELEMENT_NODE && target.classList.contains("checkbox"))
                 syncCheckbox(target);

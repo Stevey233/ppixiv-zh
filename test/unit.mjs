@@ -12,6 +12,21 @@ const constLine = (name) => src.match(new RegExp(`^const ${name} = [^;]*;`, 'm')
 let failures = 0;
 const eq = (a, b, msg) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) failures++; console.log(ok ? 'ok  ' : 'FAIL', msg, ok ? '' : `got ${JSON.stringify(a)} want ${JSON.stringify(b)}`); };
 
+// translateString, with the dictionary from src/dict.js
+const dictSrc = fs.readFileSync(new URL('../src/dict.js', import.meta.url), 'utf8');
+const translate = new Function(dictSrc + constLine('normalize') + grab('translateString') + '; return translateString;')();
+eq(translate('  Bookmarked\n privately '), '已非公开收藏', 'whitespace is collapsed before lookup');
+eq(translate('Followed Alice'), '已关注 Alice', 'public follow');
+eq(translate('Followed Alice privately'), '已非公开关注 Alice', 'private follow keeps "privately" out of the name');
+eq(translate('Now following Bob publically'), '已改为公开关注 Bob', 'follow privacy change');
+eq(translate('Added the tag "原神" to Alice'), '已给 Alice 添加关注标签「原神」', 'follow tag added');
+eq(translate('Removed the tag "原神" from Alice'), '已从 Alice 移除关注标签「原神」', 'follow tag removed');
+eq(translate('Change bookmark to private'), '改为非公开收藏', 'bookmark privacy change has no English left');
+eq(translate('Downloading 12 pages...'), '正在下载 12 页…', 'multi-page download');
+eq(translate('3 hours ago'), '3 小时前', 'relative time');
+eq(translate('Followed users'), '已关注用户', 'dictionary entries win over patterns');
+eq(translate('原神'), null, 'text without Latin letters is left alone');
+
 // pickTagTranslation
 const pick = new Function(constLine('KANA_RE') + constLine('HAN_RE') + grab('pickTagTranslation') + '; return pickTagTranslation;')();
 eq(pick('原神', { en: 'Genshin Impact' }), null, 'Han-only tag with English translation keeps the tag');

@@ -97,7 +97,7 @@ node test/thumbnails.mjs
 node test/tag-translations.mjs /path/to/ppixiv/web/vview/misc/tag-translations.js
 ```
 
-`unit.mjs` 检查推荐筛选、请求 URL、网速估算和标签译名选择。`thumbnails.mjs` 检查失败去重、重建元素后的降级，以及停用后是否仍发起升级或替换图片。
+`unit.mjs` 检查界面文字和句式的翻译、推荐筛选、请求 URL、网速估算和标签译名选择。`thumbnails.mjs` 检查失败去重、重建元素后的降级，以及停用后是否仍发起升级或替换图片。
 
 `tag-translations.mjs` 使用 ppixiv 的实际 `TagTranslations` 类，检查并发更新是否保留中文、写入失败后能否继续保存，以及 IndexedDB 不可用时的会话缓存。省略源码路径时，默认读取 `~/scratch/ppixiv-src/repo/web/vview/misc/tag-translations.js`。
 
