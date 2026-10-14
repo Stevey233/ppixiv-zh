@@ -563,6 +563,21 @@ html.ppx-zh .image-ui .ui-box .description a {
     color: var(--pz-accent-hover);
 }
 
+/* The description in the phone info dialog.  ppixiv gives it a black box. */
+html.ppx-zh .mobile-image-info .description {
+    background: var(--pz-desc-bg);
+    border-color: var(--pz-border-strong);
+    color: var(--pz-desc-text);
+}
+
+html.ppx-zh .mobile-image-info .description * {
+    color: inherit;
+}
+
+html.ppx-zh .mobile-image-info .description a {
+    color: var(--pz-accent-hover);
+}
+
 /* ------------------------------------------------------------------ context menu (hold right click) */
 
 html.ppx-zh .popup-context-menu {
@@ -829,6 +844,12 @@ html.ppx-zh .image-editor {
     --box-link-selected-hover-color: color-mix(in srgb, var(--pz-accent) 30%, var(--pz-surface-solid));
 }
 
+/* ppixiv turns the save icon green while there are unsaved edits.  Its #0f0 is for a black
+ * button, so light mode uses a darker green. */
+html.ppx-zh.pz-light .image-editor .save-edits.dirty {
+    color: #138a36;
+}
+
 /* ------------------------------------------------------------------ video controls */
 
 /* The controls fill the strip, so it can't fade out completely without losing contrast at the
@@ -960,6 +981,29 @@ html.ppx-zh.pz-light .text-entry-popup .input-box > .submit-button {
  * color. */
 html.ppx-zh.pz-light .screen-illust-container .fade-search {
     background-color: rgb(var(--pz-bg-rgb) / calc(1 - (var(--illust-hidden) - 0.1) / 0.9));
+}
+
+/* ppixiv's mobile header and navigation bar have no background, only a backdrop filter that
+ * darkens the page behind them for light text.  Give them a light surface instead.  ppixiv also
+ * hard-codes a light blue for the navigation bar's icons. */
+html.ppx-zh.pz-light .screen-search-container :is(.search-ui-mobile, .mobile-navigation-bar) {
+    background-color: var(--pz-surface-strong);
+    -webkit-backdrop-filter: var(--pz-blur);
+    backdrop-filter: var(--pz-blur);
+}
+
+html.ppx-zh.pz-light .screen-search-container .mobile-navigation-bar {
+    --button-color: var(--pz-icon);
+    --button-disabled-color: var(--pz-icon-disabled);
+}
+
+/* The image view's menu bar on phones sits on the page color, with ppixiv's white items. */
+html.ppx-zh.pz-light .mobile-illust-ui-container .item {
+    --foreground-color: var(--pz-text-3);
+}
+
+html.ppx-zh.pz-light .mobile-illust-ui-container .item.enabled {
+    --foreground-color: var(--pz-text);
 }
 
 /* Bookmark and like counts are outlined so they read over icons.  Use a light outline. */

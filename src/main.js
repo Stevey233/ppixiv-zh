@@ -164,7 +164,7 @@ function ppixivIsRunning()
 // Use a constructed stylesheet.  It doesn't go through createElement, and adopted sheets come
 // after all of the document's own stylesheets in the cascade, so equal-specificity rules
 // resolve in our favor.  Safari before 16.4 can't construct stylesheets, so it gets a <style>
-// element kept at the end of <head> instead.  ppixiv's createElement refuses to create one, but
+// element kept after the other stylesheets in <head> instead.  ppixiv's createElement refuses to create one, but
 // it keeps the original as realCreateElement.
 let themeStyle = null;
 
@@ -188,8 +188,15 @@ function ensureStyle()
     {
         if(!document.adoptedStyleSheets.includes(themeSheet))
             document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+        return;
     }
-    else if(document.head.lastElementChild != themeStyle)
+
+    // Move it only when a stylesheet comes after it.  ppixiv replaces <title> on every work shown,
+    // and moving the style each time would re-parse it and restyle the page.
+    let next = themeStyle.isConnected ? themeStyle.nextElementSibling : null;
+    while(next != null && next.tagName != "STYLE" && !(next.tagName == "LINK" && next.rel == "stylesheet"))
+        next = next.nextElementSibling;
+    if(!themeStyle.isConnected || next != null)
         document.head.append(themeStyle);
 }
 
@@ -456,11 +463,11 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
     const source = window.ppixiv?.app?.currentDataSource;
     const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
 
-    // ppixiv passes no abort signal, so notice when the result stops mattering: the filter
-    // changed, the user left the page, or the feed was replaced.  ppixiv replaces the data source
-    // only after a first page finishes loading, so leaving the page during one shows up as a URL
-    // change.  Opening a work only changes the hash.  Then stop, without the "no works" message,
-    // which would show over the next page.
+    // ppixiv passes no abort signal, so notice when retrying stops helping: the filter changed,
+    // the user left the page, or the feed was replaced.  ppixiv replaces the data source only
+    // after a first page finishes loading, so leaving the page during one shows up as a URL
+    // change.  Opening a work only changes the hash.  Then stop retrying, so ppixiv's next page
+    // doesn't wait for the retries.
     const where = () => { const url = window.ppixiv?.plocation ?? location; return url.pathname + url.search; };
     const startedAt = where();
     const stale = () => discoveryType() != type || where() != startedAt || window.ppixiv?.app?.currentDataSource !== source;
@@ -508,7 +515,13 @@ async function fetchFilteredDiscovery(fetchFunc, url, init, type)
             break;
     }
 
-    if(kept.length == 0 && !stale())
+    // When retrying stopped early, give ppixiv the last batch unfiltered.  ppixiv keeps this data
+    // source for when the user comes back, and an empty page would end its feed for good.  The
+    // "no works" message would also show over the next page.
+    if(kept.length == 0 && stale())
+        return last.response;
+
+    if(kept.length == 0)
     {
         const label = DISCOVERY_TYPES.find(([key]) => key == type)[1];
         window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有新的${label}，已停止加载。点刷新按钮可以重新获取。`);
@@ -858,6 +871,10 @@ async function prefetchPages(mediaId, pages, shownPage = null)
     const info = await getMediaInfoForPrefetch(ppixiv.mediaCache, mediaId);
     if(info == null || info.illustType == 2)
         return;
+
+    // Another work or page may have been shown while the info loaded.
+    if(shownPage != null && mediaId != lastMangaMediaId)
+        return;
     if(ppixiv.muting?.anyTagMuted?.(info.tagList) || ppixiv.muting?.isUserIdMuted?.(info.userId))
         return;
     if(shownPage != null && !await waitForShownPage(info.getMainImageUrl(shownPage).url))
@@ -904,6 +921,14 @@ function hoverWouldFetch(mediaId, page)
         return true;
     }
 }
+
+// ppixiv's viewer loads the same originals and 540 previews.  Count those as downloaded too, so
+// hovering a work that was already viewed doesn't use up the limit.
+document.addEventListener("load", (e) => {
+    const url = e.target.currentSrc;
+    if(e.target.tagName == "IMG" && url?.startsWith("https://i.pximg.net/") && !url.includes("_webp/"))
+        prefetched.add(url);
+}, true);
 
 const HOVER_THUMB_SELECTOR = ".screen-search-container .thumbnail-box [data-media-id], .screen-search-container .thumbnail-box[data-media-id]";
 
@@ -1126,12 +1151,18 @@ const setImgSrc = (img, url) => imgSrc.set.call(img, url);
 // ppixiv zooms square thumbnails to 125% while the mouse isn't over them (--zoom-thumb in its
 // main.scss).  Layout sizes leave the zoom out and getBoundingClientRect includes it, so layout
 // sizes are scaled by this.  Otherwise the IntersectionObserver would pick a larger size than
-// the one already loading, and every thumbnail would download twice.
+// the one already loading, and every thumbnail would download twice.  This follows ppixiv's
+// updateFromSettings.  Its settings are read rather than the body class it sets, because
+// changing the thumbnail style rebuilds the thumbnails before the class changes.
 const canHover = window.matchMedia("(hover: hover)");
 function thumbZoom()
 {
-    const body = document.body;
-    return body != null && canHover.matches && !body.classList.contains("disable-thumbnail-zooming") ? 1.25 : 1;
+    const ppixiv = window.ppixiv;
+    if(!canHover.matches || ppixiv?.mobile)
+        return 1;
+    if(typeof ppixiv?.settings?.get == "function")
+        return ppixiv.settings.get("thumbnail_style") == "aspect" || ppixiv.settings.get("disable_thumbnail_zooming") ? 1 : 1.25;
+    return document.body?.classList.contains("disable-thumbnail-zooming") === false ? 1.25 : 1;
 }
 
 function thumbTierLoaded(state, tier)
@@ -1296,7 +1327,8 @@ function loadDetached(url, done)
 
 // Stop trying larger sizes for an image once one fails, so scrolling it back into view doesn't
 // try again.  The failure only counts towards turning the feature off if the connection isn't
-// to blame: ppixiv's 540 has to load, and then url has to fail a second time.  An error event
+// to blame: a request for ppixiv's 540 has to get through, and then url has to fail a second
+// time.  An error event
 // can't tell a refused size from a dropped connection, and one connection reset can fail a
 // whole page of thumbnails at once.  When the connection was to blame, the image is forgotten,
 // and gets larger sizes again once the observers see it or ppixiv rebuilds it.
@@ -1313,12 +1345,14 @@ function thumbFailed(state, url)
         failedThumbUrls.delete(state.base);
         state.failed = false;
     };
-    loadDetached(state.base, (connected) => {
-        if(!connected)
-            forget();
-        else
-            loadDetached(url, (ok) => ok? forget():thumbFailures++);
-    });
+
+    // Ask the network whether it's up.  Loading the 540 in an image isn't enough, since it can
+    // come from the cache while offline.  A no-cors fetch resolves for any HTTP response and
+    // rejects only when the request didn't get through.  ppixiv replaces fetch and keeps the
+    // original as realFetch.
+    Promise.resolve()
+        .then(() => (window.realFetch ?? window.fetch)(state.base, { mode: "no-cors", cache: "no-store", credentials: "omit" }))
+        .then(() => loadDetached(url, (ok) => ok || navigator.onLine === false ? forget() : thumbFailures++), forget);
 }
 
 // Remember which tiers have loaded, for shownThumbTier.
@@ -1401,6 +1435,11 @@ new PerformanceObserver((list) => {
 function maybeUpgradeThumb(img, width, height)
 {
     const state = thumbStates.get(img);
+
+    // A thumbnail ppixiv rebuilt while a failure was being confirmed copied the failure, and the
+    // confirmation may have cleared it since.
+    if(state?.failed && !failedThumbUrls.has(state.base))
+        state.failed = false;
     if(state == null || state.failed || !active || !img.isConnected || !thumbsEnabled())
         return;
     const tier = pickThumbTier(state.mediaId, width, height);

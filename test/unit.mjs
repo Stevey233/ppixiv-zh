@@ -101,11 +101,12 @@ calls = 0;
 messages.length = 0;
 res = await fd(async () => (++calls, filterType = 'illust', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
 body = await res.json();
-eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 0, 0], 'a type switch stops the retries without the message');
+eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 2, 0], 'a type switch stops the retries, and ppixiv gets the batch unfiltered');
 calls = 0;
 res = await fd(async () => (++calls, where.pathname = '/new_illust.php', page([0, 0], { base: 1 })), '/ajax/discovery/artworks', {}, 'manga');
 where.pathname = '/discovery';
-eq([calls, messages.length], [1, 0], 'leaving the page stops the retries without the message');
+body = await res.json();
+eq([calls, body.body.thumbnails.illust.length, messages.length], [1, 2, 0], 'leaving the page stops the retries without ending the feed or the message');
 
 // getMediaInfoForPrefetch: a failed request isn't remembered, but Pixiv's own errors are.
 const infoForPrefetch = new Function(grab('getMediaInfoForPrefetch') + '; return getMediaInfoForPrefetch;')();
@@ -153,7 +154,7 @@ for(const shownAgain of [false, true])
 {
   const fetched = [], loaders = [];
   const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
-    'let shownPageLoader = null;' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
+    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
     '; return { prefetchPages, showAnother() { shownPageLoader = null; } };')(
     { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: async () => ({ illustType: 0, mangaPages: [0, 1, 2, 3], getMainImageUrl: (p) => ({ url: `p${p}` }) }) } } },
     { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
@@ -167,6 +168,23 @@ for(const shownAgain of [false, true])
   await done;
   eq([waiting, fetched], [[0, ['p0']], shownAgain ? [] : ['p1', 'p2']],
     shownAgain ? 'read-ahead is dropped when another page is shown first' : 'read-ahead starts after the page on screen loads');
+}
+
+// A read-ahead whose info arrives after another work is shown does nothing.
+{
+  const fetched = [], loaders = [];
+  let resolveInfo;
+  const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
+    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
+    '; return { prefetchPages, show(id) { lastMangaMediaId = id; } };')(
+    { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: () => new Promise((resolve) => resolveInfo = resolve) } } },
+    { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
+    (url) => fetched.push(url), new Set(), () => ({ page: 0 }));
+  const done = env.prefetchPages('illust:1-0', [1, 2], 0);
+  env.show('illust:2-0');
+  resolveInfo({ illustType: 0, mangaPages: [0, 1, 2], getMainImageUrl: (p) => ({ url: `p${p}` }) });
+  await done;
+  eq([loaders.length, fetched], [0, []], 'a read-ahead for a work no longer shown does nothing');
 }
 
 // pixivAjaxUrl

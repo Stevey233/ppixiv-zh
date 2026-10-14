@@ -8,11 +8,14 @@ const section = src.slice(
   src.indexOf('// ------------------------------------------------------------------ activation (continued)'),
 );
 
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 // zoom: ppixiv zooms square thumbnails.  dataSource: the name of ppixiv's current data source.
-// saveData: the browser's "save data" mode.
-function runtime({ zoom = false, dataSource = 'search', saveData = false } = {})
+// saveData: the browser's "save data" mode.  settings: ppixiv's settings, if given.
+function runtime({ zoom = false, dataSource = 'search', saveData = false, settings = null } = {})
 {
-  const requests = [], loaders = [], microtasks = [], events = new Map(), registered = [];
+  const requests = [], loaders = [], microtasks = [], events = new Map(), registered = [], probes = [];
+  const navigator = { onLine: true };
   const storage = new Map();
   class Image
   {
@@ -48,9 +51,12 @@ function runtime({ zoom = false, dataSource = 'search', saveData = false } = {})
     matchMedia: () => ({ matches: zoom, addEventListener() {} }),
     ppixiv: {
       app: { currentDataSource: { name: dataSource } },
+      ...(settings && { settings: { get: (key) => settings[key] } }),
       mediaCache: { getMediaInfoSync: () => ({ width: 2000, height: 1000 }), getImageDimensions: (info) => info },
       extraCache: { registerLoadingThumbnail: (mediaId, img) => { registered.push({ mediaId, src: img.src }); return Promise.resolve(); } },
     },
+    // The connection check after a failure.
+    realFetch: (url) => new Promise((resolve, reject) => probes.push({ url, resolve, reject })),
   };
   const hooks = new Function('window', 'document', 'localStorage', 'navigator', 'HTMLImageElement',
     'ResizeObserver', 'IntersectionObserver', 'PerformanceObserver', 'queueMicrotask',
@@ -58,11 +64,20 @@ function runtime({ zoom = false, dataSource = 'search', saveData = false } = {})
     ${section}
     return { resize: thumbResizeObserver.callback, visibility: thumbVisibilityObserver.callback,
       enabled: thumbsEnabled, get failures() { return thumbFailures; } };`)(
-      window, document, { getItem: (key) => storage.get(key) ?? null }, {},
+      window, document, { getItem: (key) => storage.get(key) ?? null }, navigator,
       Image, Observer, Observer, Observer, (callback) => microtasks.push(callback));
 
   return {
-    ...hooks, get failures() { return hooks.failures; }, requests, loaders, storage, registered,
+    ...hooks, get failures() { return hooks.failures; }, requests, loaders, storage, registered, probes, navigator,
+    // Answer the connection checks started so far: up means a request got through.  They
+    // start a microtask after the failure, and the retry a microtask after the answer.
+    async probe(up)
+    {
+      await tick();
+      for(const p of probes.splice(0))
+        up ? p.resolve({}) : p.reject(new TypeError('Failed to fetch'));
+      await tick();
+    },
     create(id, { width = 100, currentWidth } = {})
     {
       const box = { dataset: { id: `illust:${id}-0` }, origWidth: width, origHeight: width / 2,
@@ -105,21 +120,23 @@ for(let i = 0; i < 5; ++i)
   repeated.resize(rebuilt);
   repeated.enter(rebuilt);
 }
-repeated.settle(true);
+await repeated.probe(true);
 repeated.settle(false);
 assert.equal(repeated.failures, 1);
-assert.equal(repeated.loaders.length, 2, 'one load of the 540 and one retry, and no upgrades');
+assert.equal(repeated.loaders.length, 1, 'one retry, and no upgrades');
 assert.equal(repeated.enabled(), true);
 console.log('ok   Rebuilt thumbnails retain failures without increasing the failure count');
 
-// A failure counts once the 540 loads and the same URL fails again.
+// A failure counts once a request for the 540 gets through and the same URL fails again.
 const distinct = runtime();
 const existing = distinct.create(999);
 for(let id = 0; id < 5; ++id)
   distinct.fail(distinct.create(id));
 assert.equal(distinct.failures, 0, 'failures count only after the retry');
-distinct.settle(true, (url) => url.includes('540x540'));
-distinct.settle(false, (url) => url.includes('_webp'));
+await tick();
+assert.match(distinct.probes[0].url, /540x540_70/);
+await distinct.probe(true);
+distinct.settle(false);
 assert.equal(distinct.failures, 5);
 assert.equal(distinct.enabled(), false);
 const requestsBefore = distinct.requests.length;
@@ -130,27 +147,39 @@ assert.equal(distinct.requests.length, requestsBefore, 'disabled hooks must not 
 assert.match(distinct.create(1000).src, /540x540_70/);
 console.log('ok   Five distinct failures stop upgrades for existing and new thumbnails');
 
-// When the 540 fails too, the connection is down: nothing counts, and the work is forgotten.
+// When the request for the 540 doesn't get through, the connection is down: nothing counts,
+// and the work is forgotten.
 const offline = runtime();
 offline.fail(offline.create(1));
-offline.settle(false);
+await offline.probe(false);
 assert.equal(offline.failures, 0);
-assert.equal(offline.loaders.length, 1, 'no retry while the connection is down');
+assert.equal(offline.loaders.length, 0, 'no retry while the connection is down');
 assert.match(offline.create(1).src, /600x1200_90_webp/);
 assert.equal(offline.enabled(), true);
+// The check can pass while the browser goes offline before the retry.
+const dropped = runtime();
+dropped.fail(dropped.create(1));
+await dropped.probe(true);
+dropped.navigator.onLine = false;
+dropped.settle(false);
+assert.equal(dropped.failures, 0);
 console.log('ok   Failures while the connection is down do not count and are forgotten');
 
 // A URL that loads when tried again was a transient failure.
 const transient = runtime();
 const flaky = transient.create(1);
 transient.fail(flaky);
-transient.settle(true);
+const rebuiltMeanwhile = transient.create(1);
+assert.match(rebuiltMeanwhile.src, /540x540_70/, 'rebuilt while the failure is being checked');
+await transient.probe(true);
 transient.settle(true);
 assert.equal(transient.failures, 0);
 assert.match(transient.create(1).src, /600x1200_90_webp/, 'rebuilt thumbnails use WebP again');
 transient.enter(flaky);
+transient.enter(rebuiltMeanwhile);
 assert.equal(transient.loaders.length, 3);
-assert.match(transient.loaders[2].url, /_webp\/img-master\/1_master1200/, 'the thumbnail that fell back is upgraded again');
+assert.match(transient.loaders[1].url, /_webp\/img-master\/1_master1200/, 'the thumbnail that fell back is upgraded again');
+assert.match(transient.loaders[2].url, /_webp\/img-master\/1_master1200/, 'so is one rebuilt during the check');
 console.log('ok   A failure that does not repeat does not count');
 
 // An upgrade that finishes after disablement must not replace the displayed image.
@@ -162,7 +191,7 @@ const upgrade = pending.loaders[0];
 const original = target.src;
 for(let id = 0; id < 5; ++id)
   pending.fail(pending.create(id));
-pending.settle(true, (url) => url.includes('540x540'));
+await pending.probe(true);
 pending.settle(false, (url) => !url.includes('/999_'));
 assert.equal(pending.enabled(), false);
 await upgrade.onload();
@@ -200,6 +229,10 @@ zoomed.resize(square, 600);
 assert.equal(zoomed.loaders.length, 0, 'no second download');
 const flat = runtime({ zoom: false });
 assert.match(flat.create(7, { width: 600 }).src, /600x1200_90_webp/, 'without zoom the smaller file covers it');
+// Switching to aspect thumbnails rebuilds them before ppixiv updates the body class, so the
+// zoom comes from ppixiv's settings.
+const aspect = runtime({ zoom: true, settings: { thumbnail_style: 'aspect' } });
+assert.match(aspect.create(7, { width: 600 }).src, /600x1200_90_webp/, 'aspect thumbnails are not zoomed');
 console.log('ok   Zoomed thumbnails pick their size once');
 
 // In the manga view ppixiv already downloaded the 540s, so they stay until an upgrade loads.
