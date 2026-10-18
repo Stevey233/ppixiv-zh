@@ -332,7 +332,9 @@ html.ppx-zh .screen-search-container .thumbnail-ui-box .data-source-ui {
     padding-top: 2px;
 }
 
-/* The discovery type filter sits on the same line as the age buttons. */
+/* The recommended works filters sit on the same line as the age buttons, and wrap below them
+ * when there's no room.  On the following and bookmark pages, the first row can be empty, since
+ * ppixiv hides its R18 and premium-only buttons, so the type row goes on its own line there. */
 html.ppx-zh .screen-search-container .data-source-ui > div:has(> .pz-discovery-type) {
     display: flex;
     flex-wrap: wrap;
@@ -1013,8 +1015,284 @@ html.ppx-zh.pz-light {
 
 /* ------------------------------------------------------------------ appearance button */
 
-html.ppx-zh .pz-theme-button svg {
+html.ppx-zh .pz-theme-button svg,
+html.ppx-zh .pz-settings-button svg {
     display: block;
     width: 100%;
     height: 100%;
+}
+
+/* ------------------------------------------------------------------ seen works */
+
+/* Works opened in the image view.  Hovering shows the thumbnail at full strength. */
+html.ppx-zh .thumbnail-box.pz-seen .thumb {
+    opacity: 0.4;
+    transition: opacity 0.2s var(--pz-ease);
+}
+
+html.ppx-zh .thumbnail-box.pz-seen:hover .thumb {
+    opacity: 1;
+}
+
+/* ------------------------------------------------------------------ tag autocomplete */
+
+/* Suggestions show the Chinese translation in place of the tag.  Show the tag after it, so a
+ * suggested Japanese tag can be told apart from the Chinese tag of the same name.  The script sets
+ * pz-zh-tags while Chinese tag translations are chosen. */
+html.ppx-zh.pz-zh-tags .input-dropdown .entry.autocomplete .word.tag[data-translated-tag]::after {
+    content: attr(data-tag);
+    margin-left: 0.45em;
+    color: var(--pz-text-3);
+    font-size: 0.85em;
+}
+
+/* ------------------------------------------------------------------ settings panel */
+
+html.ppx-zh .pz-settings {
+    position: fixed;
+    inset: 0;
+    z-index: 100000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.45);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    color: var(--pz-text);
+    font-family: var(--pz-font);
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+html.ppx-zh.pz-light .pz-settings {
+    background: rgba(20, 24, 34, 0.28);
+}
+
+html.ppx-zh .pz-settings-box {
+    display: flex;
+    flex-direction: column;
+    width: min(560px, 100%);
+    max-height: min(780px, 100%);
+    overflow: hidden;
+    background: var(--pz-dialog-bg);
+    border: 1px solid var(--pz-border);
+    border-radius: 20px;
+    box-shadow: var(--pz-shadow);
+    outline: none;
+}
+
+html.ppx-zh .pz-settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 14px 6px 22px;
+    font-size: 1.15em;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+html.ppx-zh .pz-settings button {
+    font: inherit;
+    cursor: pointer;
+}
+
+html.ppx-zh .pz-settings button:focus-visible {
+    outline: 2px solid var(--pz-accent-ring);
+    outline-offset: 1px;
+}
+
+html.ppx-zh .pz-settings-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    background: none;
+    color: var(--pz-icon);
+    transition: background-color 0.15s, color 0.15s;
+}
+
+html.ppx-zh .pz-settings-close:hover {
+    background: var(--pz-raise-hover);
+    color: var(--pz-text-strong);
+}
+
+html.ppx-zh .pz-settings-close svg {
+    width: 20px;
+    height: 20px;
+}
+
+html.ppx-zh .pz-settings-body {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 22px 20px;
+}
+
+html.ppx-zh .pz-settings-section {
+    margin: 18px 0 2px;
+    color: var(--pz-text-3);
+    font-size: 0.8em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+}
+
+html.ppx-zh .pz-settings-section:first-child {
+    margin-top: 6px;
+}
+
+html.ppx-zh .pz-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--pz-border);
+}
+
+html.ppx-zh .pz-settings-row:last-child {
+    border-bottom: none;
+}
+
+/* Kept apart from the rule above, so browsers without :has() still apply that one. */
+html.ppx-zh .pz-settings-row:has(+ .pz-settings-section) {
+    border-bottom: none;
+}
+
+html.ppx-zh .pz-settings-text {
+    min-width: 0;
+}
+
+html.ppx-zh .pz-settings-label {
+    font-size: 0.95em;
+    font-weight: 500;
+}
+
+html.ppx-zh .pz-settings-explanation {
+    margin-top: 3px;
+    color: var(--pz-text-2);
+    font-size: 0.8em;
+    line-height: 1.55;
+}
+
+html.ppx-zh .pz-choice {
+    display: inline-flex;
+    flex: none;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 11px;
+    background: var(--pz-raise);
+}
+
+html.ppx-zh .pz-choice button {
+    padding: 5px 12px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--pz-text-2);
+    font-size: 0.85em;
+    white-space: nowrap;
+    transition: background-color 0.15s, color 0.15s;
+}
+
+html.ppx-zh .pz-choice button:hover {
+    color: var(--pz-text);
+}
+
+html.ppx-zh .pz-choice button.selected {
+    background: var(--pz-accent);
+    color: #fff;
+}
+
+html.ppx-zh .pz-settings-actions {
+    padding-top: 0;
+    color: var(--pz-text-2);
+    font-size: 0.85em;
+}
+
+html.ppx-zh .pz-seen-clear {
+    padding: 5px 12px;
+    border: 1px solid var(--pz-border-strong);
+    border-radius: 8px;
+    background: none;
+    color: var(--pz-text);
+    transition: background-color 0.15s;
+}
+
+html.ppx-zh .pz-seen-clear:hover {
+    background: var(--pz-raise-hover);
+}
+
+html.ppx-zh .pz-settings-wide {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+html.ppx-zh .pz-filename-input {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--pz-border-strong);
+    border-radius: 10px;
+    background: var(--pz-input-bg);
+    color: var(--pz-text);
+    font: inherit;
+    font-size: 0.9em;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+html.ppx-zh .pz-filename-input:focus {
+    border-color: var(--pz-accent);
+    background: var(--pz-input-bg-focus);
+    box-shadow: 0 0 0 3px var(--pz-accent-soft);
+}
+
+html.ppx-zh .pz-settings code {
+    padding: 0 4px;
+    border-radius: 5px;
+    background: var(--pz-raise);
+    color: var(--pz-text);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.92em;
+}
+
+html.ppx-zh .pz-filename-preview {
+    color: var(--pz-text-2);
+    font-size: 0.8em;
+    word-break: break-all;
+}
+
+/* Phones get a sheet along the bottom, with the buttons under their labels. */
+@media (max-width: 560px) {
+    html.ppx-zh .pz-settings {
+        align-items: flex-end;
+        padding: 0;
+    }
+
+    html.ppx-zh .pz-settings-box {
+        max-height: 88vh;
+        border-radius: 20px 20px 0 0;
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    html.ppx-zh .pz-settings-row:not(.pz-settings-actions) {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    html.ppx-zh .pz-choice {
+        align-self: flex-start;
+    }
+
+    /* iOS zooms the page into text boxes smaller than 16px when they get the focus. */
+    html.ppx-zh .pz-filename-input {
+        font-size: 16px;
+    }
 }

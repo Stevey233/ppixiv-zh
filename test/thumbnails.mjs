@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const src = fs.readFileSync(process.argv[2] ?? new URL('../src/main.js', import.meta.url), 'utf8');
-const section = src.slice(
-  src.indexOf('// ------------------------------------------------------------------ sharper thumbnails'),
-  src.indexOf('// ------------------------------------------------------------------ activation (continued)'),
-);
+// The section runs up to the next section header.
+const start = src.indexOf('// ------------------------------------------------------------------ sharper thumbnails');
+const section = src.slice(start, src.indexOf('\n// ------------------------------------------------------------------ ', start + 1));
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
