@@ -1024,10 +1024,11 @@ html.ppx-zh .pz-settings-button svg {
 
 /* ------------------------------------------------------------------ seen works */
 
-/* Works opened in the image view.  Hovering shows the thumbnail at full strength. */
+/* Works opened in the image view.  Hovering shows the thumbnail at full strength.  The transition
+   keeps ppixiv's own for the zoom on hover with square thumbnails. */
 html.ppx-zh .thumbnail-box.pz-seen .thumb {
     opacity: 0.4;
-    transition: opacity 0.2s var(--pz-ease);
+    transition: opacity 0.2s var(--pz-ease), transform 0.5s;
 }
 
 html.ppx-zh .thumbnail-box.pz-seen:hover .thumb {

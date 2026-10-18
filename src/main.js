@@ -510,8 +510,9 @@ function setFeedWorks(feed, json, works)
 }
 
 // For paged feeds, the pages of the feed that were requested for each of ppixiv's pages, as
-// { low, high, seq }.  When pages with nothing to keep are skipped, ppixiv's next page continues
-// after them.  seq says which page was loaded most recently.  Keyed by the request without its
+// { low, high, seq, end }.  When pages with nothing to keep are skipped, ppixiv's next page
+// continues after them.  seq says which page was loaded most recently, and end is true when the
+// last page requested was empty, the end of the feed.  Keyed by the request without its
 // page and language, the filters, and for bookmarks whether public and private are shown
 // together.  They're kept in sessionStorage, so reloading a page that starts from the page in
 // the URL starts where that page was.
@@ -534,17 +535,17 @@ function loadFeedPages(key)
     const entries = readFeedPagesStorage()[key];
     const valid = ([page, range]) => Number.isInteger(page) && page >= 1 &&
         Number.isInteger(range?.low) && Number.isInteger(range?.high) && Number.isInteger(range?.seq) &&
-        range.low >= 1 && range.low <= range.high;
+        range.low >= 1 && range.low <= range.high && (range.end === undefined || range.end === true);
     return new Map(Array.isArray(entries) ? entries.filter((entry) => Array.isArray(entry) && valid(entry)) : []);
 }
 
 // Add one page to the saved pages.  This reads them again rather than writing back a copy from
 // when the request started, since another data source may have saved pages in the meantime.
-function saveFeedPage(key, page, low, high)
+function saveFeedPage(key, page, low, high, end)
 {
     const pages = loadFeedPages(key);
     const seq = Math.max(0, ...[...pages.values()].map((range) => range.seq)) + 1;
-    pages.set(page, { low, high, seq });
+    pages.set(page, end ? { low, high, seq, end } : { low, high, seq });
 
     // Move the feed to the end, and drop the ones used longest ago.
     const saved = readFeedPagesStorage();
@@ -561,8 +562,9 @@ function saveFeedPage(key, page, low, high)
 
 // Return how to page through a paged feed: the feed's page to start from, a step of -1 if it's
 // above the pages ppixiv has, the page ppixiv asked for, urlFor(page) to request one of the
-// feed's pages, and done(page) to call with the last page requested.  Returns null for feeds that
-// aren't paged.  source is ppixiv's data source that made the request.
+// feed's pages, and done(page, end) to call with the last page requested and whether it was
+// empty.  Returns null for feeds that aren't paged.  source is ppixiv's data source that made the
+// request.
 function feedPaging(feed, url, signature, source)
 {
     const param = FEEDS[feed].pageParam;
@@ -589,16 +591,22 @@ function feedPaging(feed, url, signature, source)
     // loads each page once per data source.  A page continues after the page before it when that
     // one was loaded more recently, as when scrolling down.  Otherwise a page that was loaded
     // before starts where it was, as after a refresh or a reload, and when loading upward through
-    // pages that were seen before.  A page above the ones ppixiv has, when it started from the
-    // page in the URL, gets the page just before.  Anything else starts from the same page of the
-    // feed.
+    // pages that were seen before.  A page past the one where the feed ended starts from that
+    // empty page again.  That happens with merged bookmarks, where the other side kept going and
+    // the page was reloaded further down.  A page above the ones ppixiv has, when it started from
+    // the page in the URL, gets the page just before.  Anything else starts from the same page of
+    // the feed.
     const pages = loadFeedPages(feedKey);
     const before = pages.get(page - 1), known = pages.get(page), after = pages.get(page + 1);
+    const ended = [...pages].filter(([endPage, range]) => range.end && endPage < page)
+        .sort(([, a], [, b]) => b.seq - a.seq)[0]?.[1];
     let start = page, step = 1;
     if(before != null && (known == null || before.seq > known.seq))
         start = before.high + 1;
     else if(known != null)
         start = known.low;
+    else if(ended != null)
+        start = ended.high;
     else if(after != null)
     {
         start = Math.max(1, after.low - 1);
@@ -612,17 +620,19 @@ function feedPaging(feed, url, signature, source)
             result.searchParams.set(param, param == "offset" ? (feedPage - 1) * limit : feedPage);
             return result.toString();
         },
-        done(last) {
-            saveFeedPage(feedKey, page, Math.min(start, last), Math.max(start, last));
+        done(last, end = false) {
+            saveFeedPage(feedKey, page, Math.min(start, last), Math.max(start, last), end);
         },
     };
 }
 
-// The filters a data source started with, so changing them in another tab doesn't mix two sets
-// of filters in one feed here.  Changing them in this tab refreshes the feed, which makes a new
-// data source.  ppixiv makes a data source current before it loads anything, so the current one
-// is the one making the request.
-const feedFilterPins = new WeakMap(); // ppixiv data source -> { keep, signature, label }
+// The filters a data source started with, so a change made elsewhere doesn't mix two sets of
+// filters in one feed.  ppixiv keeps a data source for each view of a feed, such as R18 or
+// private bookmarks, and reuses it when going back to that view, so a change made in another view
+// or another tab only applies to the views loaded after it.  The buttons show the filters of the
+// view on screen, and clicking one reloads it.  ppixiv makes a data source current before it
+// loads anything, so the current one is the one making the request.
+const feedFilterPins = new WeakMap(); // ppixiv data source -> { keep, signature, label, shown }
 
 function feedFilterFor(feed)
 {
@@ -630,16 +640,35 @@ function feedFilterFor(feed)
     let filter = source != null ? feedFilterPins.get(source) : null;
     if(filter == null)
     {
-        filter = { keep: feedFilter(feed), signature: feedFilterSignature(feed), label: feedFilterLabel(feed) };
+        filter = {
+            keep: feedFilter(feed), signature: feedFilterSignature(feed), label: feedFilterLabel(feed),
+            shown: savedFeedFilters(feed),
+        };
         if(source != null)
             feedFilterPins.set(source, filter);
     }
     return filter;
 }
 
+// The saved filters, as { type, filters }.  filters is empty except on the recommendations.
+function savedFeedFilters(feed)
+{
+    return { type: feedType(feed), filters: feed == "discovery" ? discoveryFilters() : {} };
+}
+
+// The filters the view on screen was loaded with, or the saved ones if it hasn't loaded anything.
+function shownFeedFilters(feed)
+{
+    const source = window.ppixiv?.app?.currentDataSource;
+    const pin = source != null && source.name == FEEDS[feed].dataSource ? feedFilterPins.get(source) : null;
+    return pin?.shown ?? savedFeedFilters(feed);
+}
+
 // For merged bookmarks, the pages where public or private bookmarks gave nothing: "end" when
-// Pixiv had no more, "skipped" when nothing in FEED_MAX_REQUESTS pages passed the filters.
-const mergedPagesWithoutWorks = new WeakMap(); // ppixiv data source -> Map of page -> "end" or "skipped"
+// Pixiv had no more, "skipped" when nothing in FEED_MAX_REQUESTS pages passed the filters.  ended
+// has the page where each side, "show" or "hide", ended.  ppixiv doesn't ask for that side again
+// on later pages.
+const mergedPagesWithoutWorks = new WeakMap(); // ppixiv data source -> { pages: Map of page -> "end" or "skipped", ended: Map of side -> page }
 
 // filter is from feedFilterFor.
 async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
@@ -722,7 +751,7 @@ async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
         if(kept.length > 0 || (paging != null && works.length == 0))
             break;
     }
-    paging?.done(last.feedPage);
+    paging?.done(last.feedPage, paging != null && last.works.length == 0);
 
     // When retrying stopped early, give ppixiv the last batch unfiltered.  ppixiv keeps this data
     // source for when the user comes back, and an empty page would end its feed for good.  The
@@ -740,12 +769,17 @@ async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
         // empty page from one ends that one for good, and ppixiv stops loading when both pages
         // are empty.  When this one only ran out of works to keep, give ppixiv the last batch
         // marked as deleted instead.  ppixiv drops deleted bookmarks after noting that the page
-        // wasn't empty, so this one keeps going.  The message is for when ppixiv stops.
-        let pages = mergedPagesWithoutWorks.get(source);
-        if(pages == null)
-            mergedPagesWithoutWorks.set(source, pages = new Map());
-        const other = pages.get(paging.page);
-        pages.set(paging.page, skipped ? "skipped" : "end");
+        // wasn't empty, so this one keeps going.  The message is for when ppixiv stops.  The
+        // other side gives nothing either when it ended on an earlier page.
+        let merged = mergedPagesWithoutWorks.get(source);
+        if(merged == null)
+            mergedPagesWithoutWorks.set(source, merged = { pages: new Map(), ended: new Map() });
+        const side = new URL(url, location.href).searchParams.get("rest");
+        const otherEnded = merged.ended.get(side == "hide" ? "show" : "hide");
+        const other = otherEnded < paging.page ? "end" : merged.pages.get(paging.page);
+        merged.pages.set(paging.page, skipped ? "skipped" : "end");
+        if(!skipped)
+            merged.ended.set(side, Math.min(paging.page, merged.ended.get(side) ?? Infinity));
         stopped = other != null && (skipped || other == "skipped");
         if(skipped)
             works = last.works.map((work) => ({ ...work, isBookmarkable: false }));
@@ -780,8 +814,15 @@ function setupFeedFilterButtons()
     for(const row of ui?.querySelectorAll(".pz-type-filter, .pz-feed-filters") ?? [])
         if(!wanted || row.dataset.feed != feed || row.parentElement != root)
             row.remove();
-    if(!wanted || root == null || root.querySelector(":scope > .pz-type-filter"))
+    if(!wanted || root == null)
         return;
+    if(root.querySelector(":scope > .pz-type-filter"))
+    {
+        // ppixiv keeps the widget of a view it goes back to, with the buttons as they were.
+        if(window.ppixiv?.app?.currentDataSource !== feedFilterButtonsSource)
+            refreshFeedFilterButtons();
+        return;
+    }
 
     const button = (filter, value, label, popup) =>
         `<a href="#" class="box-link popup" data-filter="${filter}" data-value="${value}" data-popup="${popup}"><span class="label">${label}</span></a>`;
@@ -815,36 +856,53 @@ function setupFeedFilterButtons()
     refreshFeedFilterButtons();
 }
 
-// Return true if the filter changed.  The type always has one value selected.  The other
+// Change a filter of the view on screen, starting from the filters its buttons show, and save the
+// result.  Return true if the filter changed.  The type always has one value selected.  The other
 // filters turn off when clicked again.
 function changeFeedFilter(feed, filter, value)
 {
+    const { type, filters } = shownFeedFilters(feed);
+    let newType = type;
+    const newFilters = { ...filters };
     if(filter == "type")
     {
-        if(value == feedType(feed))
+        if(value == type)
             return false;
-        localStorage.setItem(FEEDS[feed].typeKey, value);
-        return true;
+        newType = value;
+    }
+    else
+    {
+        const parsed = value == "true" ? true : value;
+        if(newFilters[filter] === parsed)
+            delete newFilters[filter];
+        else
+            newFilters[filter] = parsed;
     }
 
-    const filters = discoveryFilters();
-    const parsed = value == "true" ? true : value;
-    if(filters[filter] === parsed)
-        delete filters[filter];
-    else
-        filters[filter] = parsed;
-    localStorage.setItem(DISCOVERY_FILTERS_KEY, JSON.stringify(filters));
+    localStorage.setItem(FEEDS[feed].typeKey, newType);
+    if(feed == "discovery")
+        localStorage.setItem(DISCOVERY_FILTERS_KEY, JSON.stringify(newFilters));
+
+    // The view is reloaded with the new filters.  Drop its pin now, so the buttons show them before
+    // the reload finishes.
+    const source = window.ppixiv?.app?.currentDataSource;
+    if(source != null)
+        feedFilterPins.delete(source);
     return true;
 }
 
+let feedFilterButtonsSource = null; // the data source the buttons were last updated for
+
 function refreshFeedFilterButtons()
 {
-    const filters = discoveryFilters();
+    feedFilterButtonsSource = window.ppixiv?.app?.currentDataSource ?? null;
+    const shown = {};
     for(const button of document.querySelectorAll(".pz-type-filter .box-link[data-filter], .pz-feed-filters .box-link[data-filter]"))
     {
         const feed = button.parentElement.dataset.feed;
+        const { type, filters } = shown[feed] ??= shownFeedFilters(feed);
         const { filter, value } = button.dataset;
-        const selected = filter == "type" ? value == feedType(feed) : String(filters[filter]) == value;
+        const selected = filter == "type" ? value == type : String(filters[filter]) == value;
         button.classList.toggle("selected", selected);
     }
 }
@@ -967,15 +1025,27 @@ function setupChineseTags()
 
     const { addTranslations, getTranslations, getTranslation } = tagTranslations;
     // Keep each read, merge and write together.  Search results and full work info can
-    // arrive at once, so the next batch must wait for the previous write to finish.
+    // arrive at once, so the next batch must wait for the previous write to finish.  With
+    // pzOnlyMissingZh, which isn't passed on to ppixiv, tags that already have a Chinese
+    // translation are left out, checked with the same read as the write.
     let pendingTranslations = Promise.resolve();
-    tagTranslations.addTranslations = function(tagList, options)
+    tagTranslations.addTranslations = function(tagList, { pzOnlyMissingZh = false, ...options } = {})
     {
         const result = pendingTranslations.then(async () => {
             let stored = null;
             try {
                 stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
             } catch(e) {
+            }
+
+            if(pzOnlyMissingZh)
+            {
+                const missing = tagList.map((tag, i) => [tag, stored?.[i]]).filter(([tag, info]) =>
+                    !info?.translation?.zh && !sessionTagTranslations.get(tag.tag)?.zh);
+                if(missing.length == 0)
+                    return;
+                tagList = missing.map(([tag]) => tag);
+                stored = missing.map(([, info]) => info);
             }
 
             const merged = tagList.map((tag, i) => {
@@ -1046,14 +1116,8 @@ async function rememberAutocompleteTranslations(response, keyword)
                 translation.includes(keyword) && !KANA_RE.test(translation))
                 found.set(tag, translation);
         }
-        if(found.size == 0)
-            return;
-
-        const stored = await tagTranslations.getTagInfo([...found.keys()]);
-        const missing = [...found].filter(([tag]) =>
-            !stored?.[tag]?.translation?.zh && !sessionTagTranslations.get(tag)?.zh);
-        if(missing.length > 0)
-            await tagTranslations.addTranslations(missing.map(([tag, zh]) => ({ tag, translation: { zh } })));
+        if(found.size > 0)
+            await tagTranslations.addTranslations([...found].map(([tag, zh]) => ({ tag, translation: { zh } })), { pzOnlyMissingZh: true });
     } catch(e) {
     }
 }
@@ -1917,6 +1981,7 @@ const SEEN_LIMIT = 50000; // the oldest are forgotten beyond this
 const seenWorks = new Set(); // illust IDs
 const seenChannel = typeof BroadcastChannel == "function" ? new BroadcastChannel("ppx-zh-seen") : null;
 let seenLoading = null;
+let seenClears = 0; // how many times the seen works were cleared, here or in another tab
 let lastSeenId = null;
 
 function seenMode()
@@ -1960,8 +2025,11 @@ async function seenDbOp(mode, func)
 function loadSeenWorks()
 {
     seenLoading ??= (async () => {
+        // If they're cleared while this reads them, what it read may be from before.  Works
+        // opened after the clear are already in seenWorks.
+        const clears = seenClears;
         const requests = await seenDbOp("readonly", (store) => [store.getAllKeys(), store.getAll()]);
-        if(requests == null)
+        if(requests == null || seenClears != clears)
             return;
         const [ids, times] = requests.map((request) => request.result);
         for(const id of ids)
@@ -2002,6 +2070,7 @@ function recordSeenWork()
 
 function clearSeenWorks()
 {
+    ++seenClears;
     seenWorks.clear();
     seenDbOp("readwrite", (store) => store.clear());
     seenChannel?.postMessage({ clear: true });
@@ -2015,7 +2084,10 @@ if(seenChannel != null)
         // since refreshSeenThumbs puts them in a selector.
         const id = e.data?.id;
         if(e.data?.clear)
+        {
+            ++seenClears;
             seenWorks.clear();
+        }
         else if(typeof id == "string" && /^\d+$/.test(id))
             seenWorks.add(id);
         else
@@ -2373,8 +2445,32 @@ for(const type of ["keydown", "keypress"])
             e.preventDefault();
             closeSettingsPanel();
         }
+        else if(type == "keydown" && e.key == "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey)
+            wrapSettingsFocus(e);
         e.stopImmediatePropagation();
     }, true);
+}
+
+// Tab on the last control goes to the first, and Shift+Tab on the first control or on the box goes
+// to the last.  The browser would move the focus out of the panel, and the focusin listener would
+// put it on the box, so Shift+Tab could never get past it.
+function wrapSettingsFocus(e)
+{
+    const controls = [...settingsPanel.querySelectorAll("button, input")]
+        .filter((control) => !control.disabled && control.getClientRects().length > 0);
+    if(controls.length == 0)
+        return;
+    const focused = document.activeElement;
+    let target = null;
+    if(e.shiftKey && (focused == controls[0] || !controls.includes(focused)))
+        target = controls.at(-1);
+    else if(!e.shiftKey && focused == controls.at(-1))
+        target = controls[0];
+    if(target != null)
+    {
+        e.preventDefault();
+        target.focus();
+    }
 }
 
 // Like ppixiv's dialogs, the panel closes when ppixiv navigates, as with the back button.

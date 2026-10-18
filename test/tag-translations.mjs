@@ -41,9 +41,12 @@ assert.equal(await tt.getTranslation('アークナイツ'), '明日方舟');
 assert.equal(concurrent[2], '明日方舟', 'reads wait for the already queued translation updates');
 console.log('ok   Concurrent search and work updates preserve Chinese translations');
 
-// Autocomplete suggestions with Chinese translations fill in tags that have none.
+// Autocomplete suggestions with Chinese translations fill in tags that have none.  ブルアカ has
+// Pixiv's own translation, which a suggestion containing the typed text doesn't replace.
 await tt.addTranslations([{ tag: 'アズールレーン', translation: { en: 'Azur Lane' } }]);
+await tt.addTranslationsDict({ 'ブルアカ': { zh: '蔚蓝档案' } });
 const candidates = [
+  { tag_name: 'ブルアカ', tag_translation: '碧蓝档案', type: 'tag_translation' },
   { tag_name: 'アズールレーン', tag_translation: '碧蓝航线', type: 'tag_translation' },
   { tag_name: 'ブルーアーカイブ', tag_translation: '蔚蓝档案', type: 'tag_translation' },
   { tag_name: '碧蓝航线', tag_translation: 'Azur Lane', type: 'tag_translation' },
@@ -60,6 +63,22 @@ assert.equal(tt._db.m.get('東方Project'), undefined, 'a translation without th
 assert.deepEqual(await tt.getTranslations(['アズールレーン', 'ブルーアーカイブ', '碧蓝航线', 'アズレン', 'グラブル']),
   { 'アズールレーン': '碧蓝航线', 'ブルーアーカイブ': '碧蓝档案', 'グラブル': '碧蓝幻想' });
 assert.deepEqual(tt._db.m.get('アズールレーン').translation, { en: 'Azur Lane', zh: '碧蓝航线' });
+assert.deepEqual(tt._db.m.get('ブルアカ').translation, { zh: '蔚蓝档案' }, 'an existing Chinese translation is kept');
+// Latin text typed into the search box: nothing is recorded, or English would be stored as Chinese.
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates: [
+  { tag_name: 'ガルパン', tag_translation: 'Girls und Panzer', type: 'tag_translation' }] })), 'Girls');
+assert.equal(tt._db.m.get('ガルパン'), undefined, 'Latin text typed is not recorded');
+// Pixiv's translation from a search page is still waiting to be written behind a slow write.  The
+// suggestion checks for it in the same queue, so it doesn't overwrite it.
+const fastSet = tt._db.multiSet;
+tt._db.multiSet = async (...args) => { await new Promise((resolve) => setTimeout(resolve, 20)); return fastSet.apply(tt._db, args); };
+const slowWrite = tt.addTranslations([{ tag: 'unrelated', translation: { en: 'unrelated' } }]);
+const official = tt.addTranslationsDict({ 'ウマ娘': { zh: '赛马娘' } });
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates: [
+  { tag_name: 'ウマ娘', tag_translation: '赛马娘 Pretty Derby', type: 'tag_translation' }] })), '赛马');
+await Promise.all([slowWrite, official]);
+tt._db.multiSet = fastSet;
+assert.equal(tt._db.m.get('ウマ娘').translation.zh, '赛马娘', 'a queued translation is not overwritten');
 await rememberAutocompleteTranslations(new Response('not json'), '碧蓝');
 await rememberAutocompleteTranslations(new Response('{}', { status: 500 }), '碧蓝');
 console.log('ok   Autocomplete adds Chinese translations that matched the typed Chinese, without replacing existing ones');

@@ -76,9 +76,10 @@ const feeds = new Function('window', 'later', 'location', 'localStorage', 'sessi
   constLine('FEED_MAX_REQUESTS'), constLine('FEED_RETRY_DELAY_MS'), constLine('feedWorks'), constLine('FEED_PAGES_KEY'), constLine('FEED_PAGES_LIMIT'),
   constLine('feedFilterPins'), constLine('mergedPagesWithoutWorks'),
   ...['feedType', 'discoveryFilters', 'feedFilterSignature', 'feedFilter', 'feedFilterLabel', 'feedForRequest', 'setFeedWorks',
-    'readFeedPagesStorage', 'loadFeedPages', 'saveFeedPage', 'feedPaging', 'feedFilterFor', 'fetchFilteredFeed'].map(grab),
+    'readFeedPagesStorage', 'loadFeedPages', 'saveFeedPage', 'feedPaging', 'feedFilterFor', 'savedFeedFilters', 'shownFeedFilters',
+    'changeFeedFilter', 'fetchFilteredFeed'].map(grab),
   src.match(/^const bookmarksShuffled = .*$/m)[0],
-  'return { fetchFilteredFeed, feedFilter, feedFilterFor, feedForRequest, loadFeedPages };'].join('\n'))(
+  'return { fetchFilteredFeed, feedFilter, feedFilterFor, feedForRequest, loadFeedPages, shownFeedFilters, changeFeedFilter };'].join('\n'))(
   { ppixiv: { message: { show: (m) => messages.push(m) }, plocation: where, app } },
   (cb) => setTimeout(cb, 0), { ...where, href: 'https://www.pixiv.net/discovery' },
   { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, String(v)) },
@@ -130,6 +131,24 @@ const pinned = feeds.feedFilterFor('discovery');
 storage.set('ppx-zh-discovery-type', 'illust');
 eq([feeds.feedFilterFor('discovery') === pinned, (newSource(), feeds.feedFilterFor('discovery').label)], [true, '插画'],
   'a filter changed elsewhere applies after a refresh');
+
+// ppixiv reuses a view's data source when going back to it, so a view loaded before a change made
+// in another view keeps its old filters.  Its buttons show them, and a click starts from them.
+setType('discovery', 'all');
+newSource({ name: 'discovery' });
+feeds.feedFilterFor('discovery');
+storage.set('ppx-zh-discovery-type', 'manga');
+storage.set('ppx-zh-discovery-filters', JSON.stringify({ hideAi: true }));
+eq(feeds.shownFeedFilters('discovery'), { type: 'all', filters: {} }, 'the buttons show the filters the view was loaded with');
+eq(feeds.changeFeedFilter('discovery', 'type', 'manga'), true, 'clicking the saved type still changes the view');
+eq([storage.get('ppx-zh-discovery-type'), storage.get('ppx-zh-discovery-filters'), feeds.shownFeedFilters('discovery')],
+  ['manga', '{}', { type: 'manga', filters: {} }], 'the view\'s filters are saved with the change, and the buttons show them at once');
+eq(feeds.changeFeedFilter('discovery', 'type', 'manga'), false, 'clicking the selected type does nothing');
+feeds.feedFilterFor('discovery');
+eq([feeds.changeFeedFilter('discovery', 'hideAi', 'true'), feeds.changeFeedFilter('discovery', 'shape', 'portrait'), storage.get('ppx-zh-discovery-filters')],
+  [true, true, '{"hideAi":true,"shape":"portrait"}'], 'the other filters toggle from what the buttons show');
+storage.delete('ppx-zh-discovery-filters');
+newSource();
 calls = 0;
 setType('discovery', 'manga');
 res = await filterFeed(async () => (++calls, where.pathname = '/new_illust.php', page([0, 0], { base: 1 })), '/ajax/discovery/artworks');
@@ -257,15 +276,40 @@ requested = [];
 const [pub2, priv2] = await Promise.all([bookmarkBody(48, 'show'), bookmarkBody(48, 'hide')]);
 eq([pub2.works.map((w) => w.id), priv2.works.map((w) => w.isBookmarkable), messages.length],
   [['14'], [false, ], 0], 'merged bookmarks: page 2 continues each side, private runs out');
-// Page 3: both sides reach Pixiv's end.  ppixiv stops, and nothing was filtered away.
-const ended = await Promise.all([bookmarkBody(96, 'show'), bookmarkBody(96, 'hide')]);
-eq([ended.map((b) => b.works.length), messages.length], [[0, 0], 0], 'merged bookmarks: both sides at the end, no message');
-// Page 4: public runs out of manga while private is at its end, so ppixiv stops: message.
-for(const offset of [240, 288, 336, 384, 432, 480, 528, 576]) bookmarkPages.show[offset] = [work(offset, 0)];
-const both = await Promise.all([bookmarkBody(144, 'show'), bookmarkBody(144, 'hide')]);
-eq([both.map((b) => b.works.length), messages.length], [[1, 0], 1], 'merged bookmarks: one side ran out and the other ended, message');
+// Page 3: public reaches Pixiv's end while private keeps a manga.
+bookmarkPages.hide[240] = [work(25, 1)];
+const page3 = await Promise.all([bookmarkBody(96, 'show'), bookmarkBody(96, 'hide')]);
+eq([page3.map((b) => b.works.map((w) => w.id)), messages.length], [[[], ['25']], 0], 'merged bookmarks: public ends, private keeps going, no message');
+// Page 4: ppixiv only asks for private now.  It runs out of manga, so ppixiv stops: message.
+for(const offset of [288, 336, 384, 432]) bookmarkPages.hide[offset] = [work(offset, 0)];
+requested = [];
+const page4 = await bookmarkBody(144, 'hide');
+eq([page4.works.length, requested, messages.length], [1, ['hide288', 'hide336', 'hide384', 'hide432'], 1],
+  'merged bookmarks: private runs out after public ended on an earlier page, message');
+// Reloading at page 5: public ended on page 3, so its page 5 starts from that empty page again
+// rather than from offset 192, whose manga is already on page 2.
+newSource({ requestBookmarkType() {} });
+requested = [];
+messages.length = 0;
+const reloaded = await bookmarkBody(192, 'show');
+eq([reloaded.works.length, requested, messages.length], [0, ['show240'], 0], 'merged bookmarks: a reload past the end of one side keeps it ended');
 eq(JSON.parse(session.get('ppx-zh-feed-pages')) && Object.keys(JSON.parse(session.get('ppx-zh-feed-pages'))).every((k) => k.endsWith(' merged')), true,
   'merged bookmarks keep their own pages');
+
+// One side runs out of manga on the page where the other ends: message.  Both sides ending
+// together is the end of the bookmarks: no message.
+session.clear();
+newSource({ requestBookmarkType() {} });
+bookmarkPages.show = { 0: [work(30, 0)], 48: [work(31, 0)], 96: [work(32, 0)], 144: [work(33, 0)] };
+bookmarkPages.hide = {};
+const samePage = await Promise.all([bookmarkBody(0, 'show'), bookmarkBody(0, 'hide')]);
+eq([samePage.map((b) => b.works.length), messages.length], [[1, 0], 1], 'merged bookmarks: one side ran out and the other ended on the same page, message');
+session.clear();
+newSource({ requestBookmarkType() {} });
+messages.length = 0;
+bookmarkPages.show = {};
+const bothEnded = await Promise.all([bookmarkBody(0, 'show'), bookmarkBody(0, 'hide')]);
+eq([bothEnded.map((b) => b.works.length), messages.length], [[0, 0], 0], 'merged bookmarks: both sides at the end, no message');
 newSource();
 setType('bookmarks', 'all');
 
