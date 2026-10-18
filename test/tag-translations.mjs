@@ -10,8 +10,11 @@ const TagTranslations = new Function('KeyStorage', 'helpers', 'ppixiv', ttSrc + 
 function grab(name) { const i = main.search(new RegExp(`^(async )?function ${name}\\(`, 'm')); let d = 0; for (let k = main.indexOf('{', i); k < main.length; k++) { if (main[k] == '{') d++; else if (main[k] == '}' && --d == 0) return main.slice(i, k + 1); } }
 const c = (n) => main.match(new RegExp(`^const ${n} = [^;]*;`, 'm'))[0];
 const tt = new TagTranslations();
-const setup = new Function('window', 'localStorage', [c('TAG_LANGUAGE_KEY'), c('KANA_RE'), c('HAN_RE'), 'const sessionTagTranslations = new Map();', grab('chineseTagsEnabled'), grab('pickTagTranslation'), grab('setupChineseTags'), 'return setupChineseTags;'].join('\n'))(
-  { ppixiv: { tagTranslations: tt } }, { getItem: () => null });
+let tagLanguage = null;
+const { setupChineseTags: setup, rememberAutocompleteTranslations } = new Function('window', 'localStorage', [c('TAG_LANGUAGE_KEY'), c('KANA_RE'), c('HAN_RE'), 'const sessionTagTranslations = new Map();',
+  grab('chineseTagsEnabled'), grab('pickTagTranslation'), grab('setupChineseTags'), grab('rememberAutocompleteTranslations'),
+  'return { setupChineseTags, rememberAutocompleteTranslations };'].join('\n'))(
+  { ppixiv: { tagTranslations: tt } }, { getItem: () => tagLanguage });
 setup(); setup();
 // A search page (lang=zh) gives Chinese, then opening the work gives English only.
 await tt.addTranslationsDict({ 'ブルーアーカイブ': { zh: '碧蓝档案' } });
@@ -37,6 +40,56 @@ assert.deepEqual(tt._db.m.get('アークナイツ'), {
 assert.equal(await tt.getTranslation('アークナイツ'), '明日方舟');
 assert.equal(concurrent[2], '明日方舟', 'reads wait for the already queued translation updates');
 console.log('ok   Concurrent search and work updates preserve Chinese translations');
+
+// Autocomplete suggestions with Chinese translations fill in tags that have none.  ブルアカ has
+// Pixiv's own translation, which a suggestion containing the typed text doesn't replace.
+await tt.addTranslations([{ tag: 'アズールレーン', translation: { en: 'Azur Lane' } }]);
+await tt.addTranslationsDict({ 'ブルアカ': { zh: '蔚蓝档案' } });
+const candidates = [
+  { tag_name: 'ブルアカ', tag_translation: '碧蓝档案', type: 'tag_translation' },
+  { tag_name: 'アズールレーン', tag_translation: '碧蓝航线', type: 'tag_translation' },
+  { tag_name: 'ブルーアーカイブ', tag_translation: '蔚蓝档案', type: 'tag_translation' },
+  { tag_name: '碧蓝航线', tag_translation: 'Azur Lane', type: 'tag_translation' },
+  { tag_name: 'アズレン', tag_translation: 'アズールレーン', type: 'tag_translation' },
+  { tag_name: 'グラブル', tag_translation: '碧蓝幻想', type: 'tag_translation' },
+  { tag_name: '東方Project', tag_translation: '东方', type: 'tag_translation' },
+  { tag_name: '碧蓝', type: 'prefix' },
+];
+// Japanese typed into the search box: nothing is recorded.
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates })), 'アズ');
+assert.equal(tt._db.m.get('グラブル'), undefined);
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates })), '碧蓝');
+assert.equal(tt._db.m.get('東方Project'), undefined, 'a translation without the typed text is not recorded');
+assert.deepEqual(await tt.getTranslations(['アズールレーン', 'ブルーアーカイブ', '碧蓝航线', 'アズレン', 'グラブル']),
+  { 'アズールレーン': '碧蓝航线', 'ブルーアーカイブ': '碧蓝档案', 'グラブル': '碧蓝幻想' });
+assert.deepEqual(tt._db.m.get('アズールレーン').translation, { en: 'Azur Lane', zh: '碧蓝航线' });
+assert.deepEqual(tt._db.m.get('ブルアカ').translation, { zh: '蔚蓝档案' }, 'an existing Chinese translation is kept');
+// Latin text typed into the search box: nothing is recorded, or English would be stored as Chinese.
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates: [
+  { tag_name: 'ガルパン', tag_translation: 'Girls und Panzer', type: 'tag_translation' }] })), 'Girls');
+assert.equal(tt._db.m.get('ガルパン'), undefined, 'Latin text typed is not recorded');
+// Pixiv's translation from a search page is still waiting to be written behind a slow write.  The
+// suggestion checks for it in the same queue, so it doesn't overwrite it.
+const fastSet = tt._db.multiSet;
+tt._db.multiSet = async (...args) => { await new Promise((resolve) => setTimeout(resolve, 20)); return fastSet.apply(tt._db, args); };
+const slowWrite = tt.addTranslations([{ tag: 'unrelated', translation: { en: 'unrelated' } }]);
+const official = tt.addTranslationsDict({ 'ウマ娘': { zh: '赛马娘' } });
+await rememberAutocompleteTranslations(new Response(JSON.stringify({ candidates: [
+  { tag_name: 'ウマ娘', tag_translation: '赛马娘 Pretty Derby', type: 'tag_translation' }] })), '赛马');
+await Promise.all([slowWrite, official]);
+tt._db.multiSet = fastSet;
+assert.equal(tt._db.m.get('ウマ娘').translation.zh, '赛马娘', 'a queued translation is not overwritten');
+await rememberAutocompleteTranslations(new Response('not json'), '碧蓝');
+await rememberAutocompleteTranslations(new Response('{}', { status: 500 }), '碧蓝');
+console.log('ok   Autocomplete adds Chinese translations that matched the typed Chinese, without replacing existing ones');
+
+// With English chosen, lookups are ppixiv's own, and switching back needs no reload.
+tagLanguage = 'en';
+assert.deepEqual(await tt.getTranslations(['アズールレーン', 'グラブル'], 'en'), { 'アズールレーン': 'Azur Lane', 'グラブル': undefined });
+assert.equal(await tt.getTranslation('アズールレーン'), 'Azur Lane');
+tagLanguage = null;
+assert.equal(await tt.getTranslation('アズールレーン'), '碧蓝航线');
+console.log('ok   English lookups use ppixiv\'s methods until Chinese is chosen again');
 
 // A failed write rejects its caller, but the next batch can still be saved.
 const multiSet = tt._db.multiSet;

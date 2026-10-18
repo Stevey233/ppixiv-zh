@@ -137,6 +137,8 @@ function processElement(element)
         syncCheckbox(element);
     else if(element.tagName == "IMG" && thumbStates.has(element))
         watchThumb(element);
+    else if(element.classList.contains("thumbnail-box"))
+        markSeenThumb(element);
 }
 
 function noteMissing(text, element)
@@ -377,30 +379,539 @@ document.addEventListener("dblclick", (e) => {
     e.stopPropagation();
 }, true);
 
-// ------------------------------------------------------------------ discovery type filter
+// ------------------------------------------------------------------ feed filters
 
-// Pixiv's recommendation API only filters by age rating.  This filters its results by work type
-// before ppixiv sees them, so ppixiv lays out only the works that are kept.  ppixiv makes every
-// request through window.realFetch, which is looked up on each call.
-const DISCOVERY_TYPE_KEY = "ppx-zh-discovery-type";
-const DISCOVERY_TYPES = [
+// Pixiv's recommendation, following and bookmark APIs can't filter by work type.  The results are
+// filtered here before ppixiv sees them, so ppixiv lays out only the works that are kept.  ppixiv
+// makes every request through window.realFetch, which is looked up on each call.
+const TYPE_FILTERS = [
     ["all", "全部类型", "显示所有类型的作品"],
     ["illust", "插画", "只显示插画和动图"],
     ["manga", "漫画", "只显示漫画"],
 ];
 
-// ppixiv treats an empty page as the end of the results and stops loading.  If a page has nothing
-// of the selected type, ask for more recommendations, up to this many requests in total.
-const DISCOVERY_MAX_REQUESTS = 4;
-const DISCOVERY_RETRY_DELAY_MS = 500;
+// typeKey is where the feed's type is saved, and dataSource is ppixiv's name for the page its
+// buttons go on.  pageParam is the query parameter that pages through the feed.  The
+// recommendations have none, since every request returns different works.
+const FEEDS = {
+    discovery: { typeKey: "ppx-zh-discovery-type", dataSource: "discovery", pageParam: null },
+    following: { typeKey: "ppx-zh-following-type", dataSource: "new_works_by_following", pageParam: "p" },
+    bookmarks: { typeKey: "ppx-zh-bookmarks-type", dataSource: "bookmarks", pageParam: "offset" },
+};
 
-function discoveryType()
+// The other filters on the recommended works page, saved as JSON.  A filter is off when missing.
+const DISCOVERY_FILTERS_KEY = "ppx-zh-discovery-filters";
+const DISCOVERY_FILTERS = [
+    ["shape", "portrait", "竖图", "只显示高大于宽的作品"],
+    ["shape", "landscape", "横图", "只显示宽大于高的作品"],
+    ["pages", "single", "单页", "只显示单页作品"],
+    ["pages", "multi", "多页", "只显示多页作品"],
+    ["hideAi", true, "隐藏 AI", "隐藏 AI 生成的作品"],
+    ["hideBookmarked", true, "隐藏已收藏", "隐藏已经收藏的作品"],
+    ["hideSeen", true, "隐藏看过的", "隐藏在看图界面打开过的作品"],
+];
+
+// ppixiv treats an empty page as the end of the results and stops loading.  If a page has nothing
+// that passes the filters, ask for more, up to this many requests in total.
+const FEED_MAX_REQUESTS = 4;
+const FEED_RETRY_DELAY_MS = 500;
+
+function feedType(feed)
 {
-    const type = localStorage.getItem(DISCOVERY_TYPE_KEY);
-    return DISCOVERY_TYPES.some(([key]) => key == type) ? type : "all";
+    const type = localStorage.getItem(FEEDS[feed].typeKey);
+    return TYPE_FILTERS.some(([key]) => key == type) ? type : "all";
 }
 
-// Return the request URL as a URL if it's a GET to Pixiv's own ajax API, otherwise null.
+function discoveryFilters()
+{
+    let saved = null;
+    try {
+        saved = JSON.parse(localStorage.getItem(DISCOVERY_FILTERS_KEY));
+    } catch(e) {
+    }
+    const filters = {};
+    for(const [name, value] of DISCOVERY_FILTERS)
+        if(saved?.[name] === value)
+            filters[name] = value;
+    return filters;
+}
+
+// A string that changes whenever the feed's filters change.
+function feedFilterSignature(feed)
+{
+    return JSON.stringify([feedType(feed), feed == "discovery" ? discoveryFilters() : null]);
+}
+
+// Return a function that says whether to keep a work from the feed, or null if nothing is
+// filtered.  Works are thumbnail data as Pixiv returns it.
+function feedFilter(feed)
+{
+    const checks = [];
+    const type = feedType(feed);
+    // illustType: 0 is an illustration, 1 is manga, 2 is an animation.
+    if(type == "manga")
+        checks.push((work) => work.illustType == 1);
+    else if(type == "illust")
+        checks.push((work) => work.illustType != 1);
+
+    const filters = feed == "discovery" ? discoveryFilters() : {};
+    if(filters.shape == "portrait")
+        checks.push((work) => work.height > work.width);
+    else if(filters.shape == "landscape")
+        checks.push((work) => work.width > work.height);
+    if(filters.pages == "single")
+        checks.push((work) => work.pageCount == 1);
+    else if(filters.pages == "multi")
+        checks.push((work) => work.pageCount > 1);
+    // aiType is 2 for AI-generated works, 1 for other works and 0 for works older than the field.
+    if(filters.hideAi)
+        checks.push((work) => work.aiType != 2);
+    if(filters.hideBookmarked)
+        checks.push((work) => work.bookmarkData == null);
+    if(filters.hideSeen)
+        checks.push((work) => !seenWorks.has(String(work.id)));
+    return checks.length == 0 ? null : (work) => checks.every((check) => check(work));
+}
+
+// What the "nothing found" message calls the works it looked for.
+function feedFilterLabel(feed)
+{
+    if(feed == "discovery" && Object.keys(discoveryFilters()).length > 0)
+        return "符合筛选条件的作品";
+    return TYPE_FILTERS.find(([key]) => key == feedType(feed))[1];
+}
+
+// Shuffled bookmarks load their pages in random order, so the pages skipped for one can't be
+// continued from in the next.  They aren't filtered.
+const bookmarksShuffled = () => /[#?&]shuffle(?:[=&]|$)/.test((window.ppixiv?.plocation ?? location).hash ?? "");
+
+// Return the feed a request belongs to, or null if it isn't filtered.
+function feedForRequest(url)
+{
+    // The similar works page uses the recommendations API with sampleIllustId.  The filters are
+    // only shown on the recommended works page.
+    if(url.pathname == "/ajax/discovery/artworks")
+        return url.searchParams.has("sampleIllustId") ? null : "discovery";
+    if(url.pathname == "/ajax/follow_latest/illust")
+        return "following";
+    if(/^\/ajax\/user\/\d+\/illusts\/bookmarks$/.test(url.pathname))
+        return bookmarksShuffled() ? null : "bookmarks";
+    return null;
+}
+
+const feedWorks = (feed, json) => feed == "bookmarks" ? json?.body?.works : json?.body?.thumbnails?.illust;
+
+function setFeedWorks(feed, json, works)
+{
+    if(feed == "bookmarks")
+        json.body.works = works;
+    else
+        json.body.thumbnails.illust = works;
+}
+
+// For paged feeds, the pages of the feed that were requested for each of ppixiv's pages, as
+// { low, high, seq, end }.  When pages with nothing to keep are skipped, ppixiv's next page
+// continues after them.  seq says which page was loaded most recently, and end is true when the
+// last page requested was empty, the end of the feed.  Keyed by the request without its
+// page and language, the filters, and for bookmarks whether public and private are shown
+// together.  They're kept in sessionStorage, so reloading a page that starts from the page in
+// the URL starts where that page was.
+const FEED_PAGES_KEY = "ppx-zh-feed-pages";
+const FEED_PAGES_LIMIT = 20; // feeds remembered per tab
+
+function readFeedPagesStorage()
+{
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(FEED_PAGES_KEY));
+        return saved != null && typeof saved == "object" && !Array.isArray(saved) ? saved : {};
+    } catch(e) {
+        return {};
+    }
+}
+
+// Entries that aren't in the expected form, which other code could have written, are skipped.
+function loadFeedPages(key)
+{
+    const entries = readFeedPagesStorage()[key];
+    const valid = ([page, range]) => Number.isInteger(page) && page >= 1 &&
+        Number.isInteger(range?.low) && Number.isInteger(range?.high) && Number.isInteger(range?.seq) &&
+        range.low >= 1 && range.low <= range.high && (range.end === undefined || range.end === true);
+    return new Map(Array.isArray(entries) ? entries.filter((entry) => Array.isArray(entry) && valid(entry)) : []);
+}
+
+// Add one page to the saved pages.  This reads them again rather than writing back a copy from
+// when the request started, since another data source may have saved pages in the meantime.
+function saveFeedPage(key, page, low, high, end)
+{
+    const pages = loadFeedPages(key);
+    const seq = Math.max(0, ...[...pages.values()].map((range) => range.seq)) + 1;
+    pages.set(page, end ? { low, high, seq, end } : { low, high, seq });
+
+    // Move the feed to the end, and drop the ones used longest ago.
+    const saved = readFeedPagesStorage();
+    delete saved[key];
+    saved[key] = [...pages];
+    const keys = Object.keys(saved);
+    for(const old of keys.slice(0, Math.max(0, keys.length - FEED_PAGES_LIMIT)))
+        delete saved[old];
+    try {
+        sessionStorage.setItem(FEED_PAGES_KEY, JSON.stringify(saved));
+    } catch(e) {
+    }
+}
+
+// Return how to page through a paged feed: the feed's page to start from, a step of -1 if it's
+// above the pages ppixiv has, the page ppixiv asked for, urlFor(page) to request one of the
+// feed's pages, and done(page, end) to call with the last page requested and whether it was
+// empty.  Returns null for feeds that aren't paged.  source is ppixiv's data source that made the
+// request.
+function feedPaging(feed, url, signature, source)
+{
+    const param = FEEDS[feed].pageParam;
+    if(param == null)
+        return null;
+
+    // "p" counts pages from 1, and "offset" counts works.
+    const parsed = new URL(url, location.href);
+    const limit = Math.max(1, Math.floor(Number(parsed.searchParams.get("limit"))) || 1);
+    const page = param == "offset" ?
+        Math.floor(Math.max(0, Number(parsed.searchParams.get("offset")) || 0) / limit) + 1 :
+        Math.max(1, Math.floor(Number(parsed.searchParams.get("p"))) || 1);
+    const key = new URL(parsed);
+    key.searchParams.delete(param);
+    key.searchParams.delete("lang");
+    key.searchParams.sort();
+
+    // Showing public and private bookmarks together sends the same requests as showing public
+    // ones alone, but pages through them differently.
+    const merged = typeof source?.requestBookmarkType == "function";
+    const feedKey = key.toString() + " " + signature + (merged ? " merged" : "");
+
+    // ppixiv makes a new data source when the feed is refreshed or the page is reloaded, and it
+    // loads each page once per data source.  A page continues after the page before it when that
+    // one was loaded more recently, as when scrolling down.  Otherwise a page that was loaded
+    // before starts where it was, as after a refresh or a reload, and when loading upward through
+    // pages that were seen before.  A page past the one where the feed ended starts from that
+    // empty page again.  That happens with merged bookmarks, where the other side kept going and
+    // the page was reloaded further down.  A page above the ones ppixiv has, when it started from
+    // the page in the URL, gets the page just before.  Anything else starts from the same page of
+    // the feed.
+    const pages = loadFeedPages(feedKey);
+    const before = pages.get(page - 1), known = pages.get(page), after = pages.get(page + 1);
+    const ended = [...pages].filter(([endPage, range]) => range.end && endPage < page)
+        .sort(([, a], [, b]) => b.seq - a.seq)[0]?.[1];
+    let start = page, step = 1;
+    if(before != null && (known == null || before.seq > known.seq))
+        start = before.high + 1;
+    else if(known != null)
+        start = known.low;
+    else if(ended != null)
+        start = ended.high;
+    else if(after != null)
+    {
+        start = Math.max(1, after.low - 1);
+        step = -1;
+    }
+
+    return {
+        start, step, page, merged,
+        urlFor(feedPage) {
+            const result = new URL(parsed);
+            result.searchParams.set(param, param == "offset" ? (feedPage - 1) * limit : feedPage);
+            return result.toString();
+        },
+        done(last, end = false) {
+            saveFeedPage(feedKey, page, Math.min(start, last), Math.max(start, last), end);
+        },
+    };
+}
+
+// The filters a data source started with, so a change made elsewhere doesn't mix two sets of
+// filters in one feed.  ppixiv keeps a data source for each view of a feed, such as R18 or
+// private bookmarks, and reuses it when going back to that view, so a change made in another view
+// or another tab only applies to the views loaded after it.  The buttons show the filters of the
+// view on screen, and clicking one reloads it.  ppixiv makes a data source current before it
+// loads anything, so the current one is the one making the request.
+const feedFilterPins = new WeakMap(); // ppixiv data source -> { keep, signature, label, shown }
+
+function feedFilterFor(feed)
+{
+    const source = window.ppixiv?.app?.currentDataSource;
+    let filter = source != null ? feedFilterPins.get(source) : null;
+    if(filter == null)
+    {
+        filter = {
+            keep: feedFilter(feed), signature: feedFilterSignature(feed), label: feedFilterLabel(feed),
+            shown: savedFeedFilters(feed),
+        };
+        if(source != null)
+            feedFilterPins.set(source, filter);
+    }
+    return filter;
+}
+
+// The saved filters, as { type, filters }.  filters is empty except on the recommendations.
+function savedFeedFilters(feed)
+{
+    return { type: feedType(feed), filters: feed == "discovery" ? discoveryFilters() : {} };
+}
+
+// The filters the view on screen was loaded with, or the saved ones if it hasn't loaded anything.
+function shownFeedFilters(feed)
+{
+    const source = window.ppixiv?.app?.currentDataSource;
+    const pin = source != null && source.name == FEEDS[feed].dataSource ? feedFilterPins.get(source) : null;
+    return pin?.shown ?? savedFeedFilters(feed);
+}
+
+// For merged bookmarks, the pages where public or private bookmarks gave nothing: "end" when
+// Pixiv had no more, "skipped" when nothing in FEED_MAX_REQUESTS pages passed the filters.  ended
+// has the page where each side, "show" or "hide", ended.  ppixiv doesn't ask for that side again
+// on later pages.
+const mergedPagesWithoutWorks = new WeakMap(); // ppixiv data source -> { pages: Map of page -> "end" or "skipped", ended: Map of side -> page }
+
+// filter is from feedFilterFor.
+async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
+{
+    const source = window.ppixiv?.app?.currentDataSource;
+    const paging = feedPaging(feed, url, filter.signature, source);
+
+    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
+    // page left empty ends the feed, so only new works count.  These feeds' media IDs are always
+    // "illust:<id>-0" (ppixiv's util/media-id.js).
+    const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
+
+    // ppixiv passes no abort signal, so notice when retrying stops helping: the user left the
+    // page, or the feed was refreshed, which also happens when the filters change.  Opening a work
+    // only changes the hash, and the page ppixiv keeps in "p".  Then stop retrying, so ppixiv's
+    // next page doesn't wait for the retries.
+    const where = () => {
+        const url = window.ppixiv?.plocation ?? location;
+        const search = new URLSearchParams(url.search);
+        search.delete("p");
+        return url.pathname + "?" + search;
+    };
+    const startedAt = where();
+    const stale = () => where() != startedAt || window.ppixiv?.app?.currentDataSource !== source;
+
+    // A page loaded above the ones ppixiv has, when it started from a page in the URL, isn't
+    // retried.  If it has nothing to keep, it's given to ppixiv unfiltered, since an empty page
+    // would stop ppixiv from loading the pages below it too.
+    const maxRequests = paging?.step == -1 ? 1 : FEED_MAX_REQUESTS;
+    let last = null, requests = 0;
+    let feedPage = paging?.start;
+    const kept = [];
+    const tagTranslation = {};
+    while(requests < maxRequests)
+    {
+        if(requests > 0)
+        {
+            if(stale())
+                break;
+            await new Promise((resolve) => later(resolve, FEED_RETRY_DELAY_MS));
+            init?.signal?.throwIfAborted?.();
+            if(stale())
+                break;
+            if(paging != null)
+                ++feedPage;
+        }
+
+        ++requests;
+        const response = await fetchFunc(paging?.urlFor(feedPage) ?? url, init);
+        let json = null;
+        try {
+            json = response?.ok ? await response.clone().json() : null;
+        } catch(e) {
+        }
+
+        // Give ppixiv the error, as it would get without the filter.  Earlier requests kept
+        // nothing, or the loop would have stopped.
+        const works = feedWorks(feed, json);
+        if(!Array.isArray(works))
+        {
+            if(last != null)
+                paging?.done(last.feedPage);
+            return response;
+        }
+
+        last = { response, json, works, feedPage };
+        Object.assign(tagTranslation, json.body.tagTranslation);
+        for(const work of works)
+        {
+            // ppixiv drops deleted works from bookmarks.
+            const mediaId = `illust:${work.id}-0`;
+            if(work.isBookmarkable !== false && filter.keep(work) && !seen.has(mediaId))
+            {
+                seen.add(mediaId);
+                kept.push(work);
+            }
+        }
+
+        // An empty page of a paged feed is its end.
+        if(kept.length > 0 || (paging != null && works.length == 0))
+            break;
+    }
+    paging?.done(last.feedPage, paging != null && last.works.length == 0);
+
+    // When retrying stopped early, give ppixiv the last batch unfiltered.  ppixiv keeps this data
+    // source for when the user comes back, and an empty page would end its feed for good.  The
+    // "no works" message would also show over the next page.
+    if(kept.length == 0 && (stale() || maxRequests == 1))
+        return last.response;
+
+    const { response, json } = last;
+    let works = kept;
+    const skipped = kept.length == 0 && requests == FEED_MAX_REQUESTS && last.works.length > 0;
+    let stopped = skipped;
+    if(paging?.merged && kept.length == 0)
+    {
+        // ppixiv shows public and private bookmarks together by asking for a page of each.  An
+        // empty page from one ends that one for good, and ppixiv stops loading when both pages
+        // are empty.  When this one only ran out of works to keep, give ppixiv the last batch
+        // marked as deleted instead.  ppixiv drops deleted bookmarks after noting that the page
+        // wasn't empty, so this one keeps going.  The message is for when ppixiv stops.  The
+        // other side gives nothing either when it ended on an earlier page.
+        let merged = mergedPagesWithoutWorks.get(source);
+        if(merged == null)
+            mergedPagesWithoutWorks.set(source, merged = { pages: new Map(), ended: new Map() });
+        const side = new URL(url, location.href).searchParams.get("rest");
+        const otherEnded = merged.ended.get(side == "hide" ? "show" : "hide");
+        const other = otherEnded < paging.page ? "end" : merged.pages.get(paging.page);
+        merged.pages.set(paging.page, skipped ? "skipped" : "end");
+        if(!skipped)
+            merged.ended.set(side, Math.min(paging.page, merged.ended.get(side) ?? Infinity));
+        stopped = other != null && (skipped || other == "skipped");
+        if(skipped)
+            works = last.works.map((work) => ({ ...work, isBookmarkable: false }));
+    }
+
+    if(stopped)
+        window.ppixiv?.message?.show(paging == null ?
+            `连续 ${FEED_MAX_REQUESTS} 次推荐里都没有新的${filter.label}，已停止加载。点刷新按钮可以重新获取。` :
+            `接下来 ${FEED_MAX_REQUESTS} 页里都没有${filter.label}，已停止加载。`);
+
+    setFeedWorks(feed, json, works);
+    if(json.body.tagTranslation != null)
+        json.body.tagTranslation = tagTranslation;
+    return new Response(JSON.stringify(json), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+    });
+}
+
+function setupFeedFilterButtons()
+{
+    const name = window.ppixiv?.app?.currentDataSource?.name;
+    const feed = Object.keys(FEEDS).find((key) => FEEDS[key].dataSource == name);
+
+    // The rows go inside the root of ppixiv's widget for the page, so they're removed with it.
+    // Shuffled bookmarks aren't filtered, and ppixiv keeps its buttons when shuffling is turned
+    // on, so remove ours then.
+    const ui = document.querySelector(".screen-search-container .data-source-ui");
+    const root = ui?.firstElementChild;
+    const wanted = feed != null && !(feed == "bookmarks" && bookmarksShuffled());
+    for(const row of ui?.querySelectorAll(".pz-type-filter, .pz-feed-filters") ?? [])
+        if(!wanted || row.dataset.feed != feed || row.parentElement != root)
+            row.remove();
+    if(!wanted || root == null)
+        return;
+    if(root.querySelector(":scope > .pz-type-filter"))
+    {
+        // ppixiv keeps the widget of a view it goes back to, with the buttons as they were.
+        if(window.ppixiv?.app?.currentDataSource !== feedFilterButtonsSource)
+            refreshFeedFilterButtons();
+        return;
+    }
+
+    const button = (filter, value, label, popup) =>
+        `<a href="#" class="box-link popup" data-filter="${filter}" data-value="${value}" data-popup="${popup}"><span class="label">${label}</span></a>`;
+    const buttonRows = [TYPE_FILTERS.map(([key, label, popup]) => button("type", key, label, popup))];
+    if(feed == "discovery")
+        buttonRows.push(DISCOVERY_FILTERS.map(([filter, value, label, popup]) => button(filter, value, label, popup)));
+
+    buttonRows.forEach((buttons, i) => {
+        const row = document.createElement("div");
+        row.className = "box-button-row " + (i == 0 ? "pz-type-filter" : "pz-feed-filters");
+        if(feed == "discovery" && i == 0)
+            row.classList.add("pz-discovery-type");
+        row.dataset.feed = feed;
+        row.innerHTML = buttons.join("");
+        root.append(row);
+
+        row.addEventListener("click", (e) => {
+            const button = e.target.closest(".box-link[data-filter]");
+            if(button == null)
+                return;
+            e.preventDefault();
+            e.stopPropagation();
+            if(!changeFeedFilter(feed, button.dataset.filter, button.dataset.value))
+                return;
+            refreshFeedFilterButtons();
+
+            // Reload the feed with the new filters.
+            document.querySelector(".screen-search-container .refresh-search-button")?.click();
+        });
+    });
+    refreshFeedFilterButtons();
+}
+
+// Change a filter of the view on screen, starting from the filters its buttons show, and save the
+// result.  Return true if the filter changed.  The type always has one value selected.  The other
+// filters turn off when clicked again.
+function changeFeedFilter(feed, filter, value)
+{
+    const { type, filters } = shownFeedFilters(feed);
+    let newType = type;
+    const newFilters = { ...filters };
+    if(filter == "type")
+    {
+        if(value == type)
+            return false;
+        newType = value;
+    }
+    else
+    {
+        const parsed = value == "true" ? true : value;
+        if(newFilters[filter] === parsed)
+            delete newFilters[filter];
+        else
+            newFilters[filter] = parsed;
+    }
+
+    localStorage.setItem(FEEDS[feed].typeKey, newType);
+    if(feed == "discovery")
+        localStorage.setItem(DISCOVERY_FILTERS_KEY, JSON.stringify(newFilters));
+
+    // The view is reloaded with the new filters.  Drop its pin now, so the buttons show them before
+    // the reload finishes.
+    const source = window.ppixiv?.app?.currentDataSource;
+    if(source != null)
+        feedFilterPins.delete(source);
+    return true;
+}
+
+let feedFilterButtonsSource = null; // the data source the buttons were last updated for
+
+function refreshFeedFilterButtons()
+{
+    feedFilterButtonsSource = window.ppixiv?.app?.currentDataSource ?? null;
+    const shown = {};
+    for(const button of document.querySelectorAll(".pz-type-filter .box-link[data-filter], .pz-feed-filters .box-link[data-filter]"))
+    {
+        const feed = button.parentElement.dataset.feed;
+        const { type, filters } = shown[feed] ??= shownFeedFilters(feed);
+        const { filter, value } = button.dataset;
+        const selected = filter == "type" ? value == type : String(filters[filter]) == value;
+        button.classList.toggle("selected", selected);
+    }
+}
+
+// The tag autocomplete, which isn't under /ajax/.
+const AUTOCOMPLETE_PATH = "/rpc/cps.php";
+
+// Return the request URL as a URL if it's a GET to Pixiv's own ajax API or the tag autocomplete,
+// otherwise null.
 function pixivAjaxUrl(url, init)
 {
     if(typeof url != "string" && !(url instanceof URL))
@@ -409,7 +920,9 @@ function pixivAjaxUrl(url, init)
         return null;
     try {
         const parsed = new URL(url, location.href);
-        return parsed.origin == location.origin && parsed.pathname.startsWith("/ajax/") ? parsed : null;
+        if(parsed.origin != location.origin)
+            return null;
+        return parsed.pathname.startsWith("/ajax/") || parsed.pathname == AUTOCOMPLETE_PATH ? parsed : null;
     } catch(e) {
         return null;
     }
@@ -434,148 +947,33 @@ function installFetchHook()
         if(ajaxUrl == null)
             return await realFetch.call(this, url, init);
 
-        if(chineseTagsEnabled())
+        const chinese = chineseTagsEnabled();
+        if(chinese)
         {
             ajaxUrl.searchParams.set("lang", "zh");
             url = ajaxUrl.toString();
         }
 
-        // The similar works page uses the same API with sampleIllustId.  The filter is only shown
-        // on the recommended works page, so only filter there.
-        const type = discoveryType();
-        if(type == "all" || ajaxUrl.pathname != "/ajax/discovery/artworks" || ajaxUrl.searchParams.has("sampleIllustId"))
+        if(ajaxUrl.pathname == AUTOCOMPLETE_PATH)
+        {
+            const response = await realFetch.call(this, url, init);
+            if(chinese)
+                await rememberAutocompleteTranslations(response, ajaxUrl.searchParams.get("keyword"));
+            return response;
+        }
+
+        const feed = feedForRequest(ajaxUrl);
+        const filter = feed == null ? null : feedFilterFor(feed);
+        if(filter?.keep == null)
             return await realFetch.call(this, url, init);
 
-        return await fetchFilteredDiscovery((u, i) => realFetch.call(this, u, i), url, init, type);
+        // Hiding seen works needs the list of them.
+        if(feed == "discovery")
+            await loadSeenWorks();
+        return await fetchFilteredFeed((u, i) => realFetch.call(this, u, i), url, init, feed, filter);
     };
     hookedFetch.pzHooked = true;
     window.realFetch = hookedFetch;
-}
-
-async function fetchFilteredDiscovery(fetchFunc, url, init, type)
-{
-    // illustType: 0 is an illustration, 1 is manga, 2 is an animation.
-    const keep = (thumb) => type == "manga"? thumb.illustType == 1:thumb.illustType != 1;
-
-    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
-    // page left empty ends the feed, so only new works count.  Discovery media IDs are always
-    // "illust:<id>-0" (ppixiv's util/media-id.js).
-    const source = window.ppixiv?.app?.currentDataSource;
-    const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
-
-    // ppixiv passes no abort signal, so notice when retrying stops helping: the filter changed,
-    // the user left the page, or the feed was replaced.  ppixiv replaces the data source only
-    // after a first page finishes loading, so leaving the page during one shows up as a URL
-    // change.  Opening a work only changes the hash.  Then stop retrying, so ppixiv's next page
-    // doesn't wait for the retries.
-    const where = () => { const url = window.ppixiv?.plocation ?? location; return url.pathname + url.search; };
-    const startedAt = where();
-    const stale = () => discoveryType() != type || where() != startedAt || window.ppixiv?.app?.currentDataSource !== source;
-
-    let last = null;
-    const kept = [];
-    const tagTranslation = {};
-    for(let request = 0; request < DISCOVERY_MAX_REQUESTS; ++request)
-    {
-        if(request > 0)
-        {
-            if(stale())
-                break;
-            await new Promise((resolve) => later(resolve, DISCOVERY_RETRY_DELAY_MS));
-            init?.signal?.throwIfAborted?.();
-            if(stale())
-                break;
-        }
-
-        const response = await fetchFunc(url, init);
-        let json = null;
-        try {
-            json = response?.ok ? await response.clone().json() : null;
-        } catch(e) {
-        }
-
-        // Give ppixiv the error, as it would get without the filter.  Earlier requests kept
-        // nothing, or the loop would have stopped.
-        const thumbs = json?.body?.thumbnails?.illust;
-        if(!Array.isArray(thumbs))
-            return response;
-
-        last = { response, json };
-        Object.assign(tagTranslation, json.body.tagTranslation);
-        for(const thumb of thumbs)
-        {
-            const mediaId = `illust:${thumb.id}-0`;
-            if(keep(thumb) && !seen.has(mediaId))
-            {
-                seen.add(mediaId);
-                kept.push(thumb);
-            }
-        }
-        if(kept.length > 0)
-            break;
-    }
-
-    // When retrying stopped early, give ppixiv the last batch unfiltered.  ppixiv keeps this data
-    // source for when the user comes back, and an empty page would end its feed for good.  The
-    // "no works" message would also show over the next page.
-    if(kept.length == 0 && stale())
-        return last.response;
-
-    if(kept.length == 0)
-    {
-        const label = DISCOVERY_TYPES.find(([key]) => key == type)[1];
-        window.ppixiv?.message?.show(`连续 ${DISCOVERY_MAX_REQUESTS} 次推荐里都没有新的${label}，已停止加载。点刷新按钮可以重新获取。`);
-    }
-
-    const { response, json } = last;
-    json.body.thumbnails.illust = kept;
-    json.body.tagTranslation = tagTranslation;
-    return new Response(JSON.stringify(json), {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-    });
-}
-
-function setupDiscoveryTypeButtons()
-{
-    if(window.ppixiv?.app?.currentDataSource?.name != "discovery")
-        return;
-
-    const ui = document.querySelector(".screen-search-container .data-source-ui");
-    const ageRow = ui?.querySelector(".box-button-row");
-    if(ageRow == null || ui.querySelector(".pz-discovery-type"))
-        return;
-
-    const row = document.createElement("div");
-    row.className = "box-button-row pz-discovery-type";
-    row.innerHTML = DISCOVERY_TYPES.map(([key, label, popup]) =>
-        `<a href="#" class="box-link popup" data-type="${key}" data-popup="${popup}"><span class="label">${label}</span></a>`).join("");
-    ageRow.after(row);
-    refreshDiscoveryTypeButtons(row);
-
-    row.addEventListener("click", (e) => {
-        const button = e.target.closest(".box-link[data-type]");
-        if(button == null)
-            return;
-        e.preventDefault();
-        e.stopPropagation();
-        if(button.dataset.type == discoveryType())
-            return;
-
-        localStorage.setItem(DISCOVERY_TYPE_KEY, button.dataset.type);
-        refreshDiscoveryTypeButtons(row);
-
-        // Reload the recommendations with the new filter.
-        document.querySelector(".screen-search-container .refresh-search-button")?.click();
-    });
-}
-
-function refreshDiscoveryTypeButtons(row)
-{
-    const type = discoveryType();
-    for(const button of row.querySelectorAll(".box-link[data-type]"))
-        button.classList.toggle("selected", button.dataset.type == type);
 }
 
 // ------------------------------------------------------------------ Chinese tag translations
@@ -612,27 +1010,42 @@ function pickTagTranslation(tag, translation)
     return value;
 }
 
+// The wrappers stay installed when English is chosen, and pass lookups to ppixiv's own methods,
+// so the choice takes effect without a reload.  Translations are still merged, so the Chinese ones
+// are there when Chinese is chosen again.
 function setupChineseTags()
 {
     const tagTranslations = window.ppixiv?.tagTranslations;
-    if(tagTranslations == null || tagTranslations.pzChinese || !chineseTagsEnabled())
+    if(tagTranslations == null || tagTranslations.pzChinese)
         return;
     if(typeof tagTranslations.addTranslations != "function" || typeof tagTranslations.getTagInfo != "function" ||
         typeof tagTranslations._db?.multiGet != "function")
         return;
     tagTranslations.pzChinese = true;
 
-    const addTranslations = tagTranslations.addTranslations;
+    const { addTranslations, getTranslations, getTranslation } = tagTranslations;
     // Keep each read, merge and write together.  Search results and full work info can
-    // arrive at once, so the next batch must wait for the previous write to finish.
+    // arrive at once, so the next batch must wait for the previous write to finish.  With
+    // pzOnlyMissingZh, which isn't passed on to ppixiv, tags that already have a Chinese
+    // translation are left out, checked with the same read as the write.
     let pendingTranslations = Promise.resolve();
-    tagTranslations.addTranslations = function(tagList, options)
+    tagTranslations.addTranslations = function(tagList, { pzOnlyMissingZh = false, ...options } = {})
     {
         const result = pendingTranslations.then(async () => {
             let stored = null;
             try {
                 stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
             } catch(e) {
+            }
+
+            if(pzOnlyMissingZh)
+            {
+                const missing = tagList.map((tag, i) => [tag, stored?.[i]]).filter(([tag, info]) =>
+                    !info?.translation?.zh && !sessionTagTranslations.get(tag.tag)?.zh);
+                if(missing.length == 0)
+                    return;
+                tagList = missing.map(([tag]) => tag);
+                stored = missing.map(([, info]) => info);
             }
 
             const merged = tagList.map((tag, i) => {
@@ -651,8 +1064,10 @@ function setupChineseTags()
     };
 
     // ppixiv always asks for "en".  Answer with Chinese when there is one.
-    tagTranslations.getTranslations = async function(tags)
+    tagTranslations.getTranslations = async function(tags, ...args)
     {
+        if(!chineseTagsEnabled())
+            return await getTranslations.call(this, tags, ...args);
         if(!this.enabled)
             return {};
 
@@ -668,11 +1083,57 @@ function setupChineseTags()
         return result;
     };
 
-    tagTranslations.getTranslation = async function(tag)
+    tagTranslations.getTranslation = async function(tag, ...args)
     {
+        if(!chineseTagsEnabled())
+            return await getTranslation.call(this, tag, ...args);
         const result = await this.getTranslations([tag]);
         return result[tag] ?? tag;
     };
+}
+
+// Pixiv's tag autocomplete only matches translations when the request names a language, and
+// ppixiv sends none.  With lang=zh, typing 碧蓝 also suggests アズールレーン, whose translation is
+// 碧蓝航线.  ppixiv only records English translations from autocomplete, so the dropdown would
+// show the Japanese tag alone.  Record the Chinese ones for tags with no Chinese translation yet.
+// tag_translation is the text the suggestion matched, in any language, so only Chinese typed by
+// the user that the translation contains counts.  This finishes before ppixiv reads the response,
+// so its lookups for the dropdown find them.
+async function rememberAutocompleteTranslations(response, keyword)
+{
+    const tagTranslations = window.ppixiv?.tagTranslations;
+    keyword = keyword?.trim();
+    if(!tagTranslations?.pzChinese || !response?.ok || !keyword || !HAN_RE.test(keyword) || KANA_RE.test(keyword))
+        return;
+
+    try {
+        const json = await response.clone().json();
+        const found = new Map();
+        for(const candidate of json?.candidates ?? [])
+        {
+            const { type, tag_name: tag, tag_translation: translation } = candidate;
+            if(type == "tag_translation" && tag && translation && tag != translation &&
+                translation.includes(keyword) && !KANA_RE.test(translation))
+                found.set(tag, translation);
+        }
+        if(found.size > 0)
+            await tagTranslations.addTranslations([...found].map(([tag, zh]) => ({ tag, translation: { zh } })), { pzOnlyMissingZh: true });
+    } catch(e) {
+    }
+}
+
+// ppixiv translates the text in manga pages to English by default.  Use Simplified Chinese
+// instead, unless a language was already picked in ppixiv's settings.
+let imageTranslationChecked = false;
+
+function setupImageTranslationLanguage()
+{
+    const settings = window.ppixiv?.settings;
+    if(imageTranslationChecked || typeof settings?.set != "function")
+        return;
+    imageTranslationChecked = true;
+    if(!("_ppixiv_translation_language" in localStorage))
+        settings.set("translation_language", "CHS");
 }
 
 // ------------------------------------------------------------------ light and dark mode
@@ -701,6 +1162,9 @@ function applyTheme()
     const light = mode == "light" || (mode == "auto" && !systemDark.matches);
     document.documentElement.classList.toggle("pz-light", light);
 
+    // Styles that only apply with Chinese tag translations.
+    document.documentElement.classList.toggle("pz-zh-tags", chineseTagsEnabled());
+
     // ppixiv sets the browser's toolbar color to black.  #f3f4f7 is --pz-bg in light mode.
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", light ? "#f3f4f7" : "#000");
 
@@ -719,19 +1183,22 @@ systemDark.addEventListener("change", () => {
 
 // Follow settings changed in other tabs.  Otherwise the buttons here show the old choice, and
 // the next click acts on the other tab's value.  A null key means storage was cleared.  Results
-// already loaded keep their type until the next refresh.
+// already loaded keep their filters until the next refresh.
 window.addEventListener("storage", (e) => {
     if(!active || (e.storageArea != null && e.storageArea != localStorage))
         return;
-    if(e.key == null || e.key == DISCOVERY_TYPE_KEY)
-    {
-        const row = document.querySelector(".pz-discovery-type");
-        if(row != null)
-            refreshDiscoveryTypeButtons(row);
-    }
-    if(e.key == null || e.key == THEME_KEY)
-        applyTheme();
+    if(e.key == null || e.key.startsWith("ppx-zh-"))
+        settingChanged();
 });
+
+// Bring what's on screen up to date with the settings.
+function settingChanged()
+{
+    runSetup(applyTheme);
+    runSetup(refreshFeedFilterButtons);
+    runSetup(refreshSeenThumbs);
+    runSetup(refreshSettingsPanel);
+}
 
 // The button goes left of the gear: in the toolbar above the results on desktop, and in the
 // navigation bar at the bottom on phones and iPads.
@@ -755,7 +1222,7 @@ function setupThemeButton()
         e.preventDefault();
         e.stopPropagation();
         localStorage.setItem(THEME_KEY, THEME_MODES[themeMode()].next);
-        applyTheme();
+        settingChanged();
     });
 }
 
@@ -773,7 +1240,9 @@ function setupThemeButton()
 //
 // Each hover prefetch costs an API request and a full-size download, so hovers are limited to
 // HOVER_PREFETCH_LIMIT a minute, leaving Pixiv's rate limits to ppixiv.  Nothing is prefetched
-// when the browser's "save data" mode is on.
+// when the browser's "save data" mode is on.  Hover prefetching can also be turned off in the
+// settings panel.
+const HOVER_PREFETCH_KEY = "ppx-zh-hover-prefetch"; // "on" (default) or "off"
 const HOVER_DELAY_MS = 300;
 const HOVER_PREFETCH_LIMIT = 30;
 const MAX_PREFETCHES = 3;
@@ -787,6 +1256,7 @@ let hoveredMediaId = null;
 let lastMangaMediaId = null;
 
 const saveData = () => navigator.connection?.saveData == true;
+const hoverPrefetchEnabled = () => localStorage.getItem(HOVER_PREFETCH_KEY) != "off";
 
 // Return true and record the hover if another hover prefetch fits in the last minute.
 function takeHoverPrefetch()
@@ -962,11 +1432,11 @@ document.addEventListener("pointermove", (e) => {
     hoverTimer = null;
 
     const parsed = parseMediaId(mediaId);
-    if(parsed == null)
+    if(parsed == null || !hoverPrefetchEnabled())
         return;
     hoverTimer = later(() => {
         hoverTimer = null;
-        if(hoveredMediaId != mediaId || saveData())
+        if(hoveredMediaId != mediaId || saveData() || !hoverPrefetchEnabled())
             return;
 
         // Muted works show a placeholder.  Don't download what the user chose not to see.
@@ -1499,11 +1969,519 @@ function trackExistingThumbs()
             trackThumb(img, img.src);
 }
 
+// ------------------------------------------------------------------ seen works
+
+// Works opened in the image view are remembered in IndexedDB, and their thumbnails are dimmed.
+// The recommended works page can also leave them out (see feed filters).  Other tabs are told
+// about each work through a BroadcastChannel.
+const SEEN_KEY = "ppx-zh-seen"; // "dim" (default), "keep" (remember without dimming) or "off"
+const SEEN_DB = "ppx-zh-seen";
+const SEEN_LIMIT = 50000; // the oldest are forgotten beyond this
+
+const seenWorks = new Set(); // illust IDs
+const seenChannel = typeof BroadcastChannel == "function" ? new BroadcastChannel("ppx-zh-seen") : null;
+let seenLoading = null;
+let seenClears = 0; // how many times the seen works were cleared, here or in another tab
+let lastSeenId = null;
+
+function seenMode()
+{
+    const mode = localStorage.getItem(SEEN_KEY);
+    return mode == "keep" || mode == "off" ? mode : "dim";
+}
+
+// Run func(store) in a transaction, and resolve to what it returned once the transaction
+// completes, or to null if IndexedDB is unavailable, as in Firefox private windows.  Like
+// ppixiv's KeyStorage, the database is closed again after each operation.
+async function seenDbOp(mode, func)
+{
+    let db;
+    try {
+        db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open(SEEN_DB, 1);
+            request.onupgradeneeded = () => request.result.createObjectStore("seen");
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    } catch(e) {
+        return null;
+    }
+
+    try {
+        return await new Promise((resolve, reject) => {
+            const transaction = db.transaction("seen", mode);
+            const result = func(transaction.objectStore("seen"));
+            transaction.oncomplete = () => resolve(result);
+            transaction.onerror = transaction.onabort = () => reject(transaction.error);
+        });
+    } catch(e) {
+        return null;
+    } finally {
+        db.close();
+    }
+}
+
+// Load the IDs of seen works once.  The store maps each ID to when it was last opened.
+function loadSeenWorks()
+{
+    seenLoading ??= (async () => {
+        // If they're cleared while this reads them, what it read may be from before.  Works
+        // opened after the clear are already in seenWorks.
+        const clears = seenClears;
+        const requests = await seenDbOp("readonly", (store) => [store.getAllKeys(), store.getAll()]);
+        if(requests == null || seenClears != clears)
+            return;
+        const [ids, times] = requests.map((request) => request.result);
+        for(const id of ids)
+            seenWorks.add(id);
+
+        if(ids.length > SEEN_LIMIT)
+        {
+            const oldest = ids.map((id, i) => [times[i], id]).sort((a, b) => a[0] - b[0]).slice(0, ids.length - SEEN_LIMIT);
+            for(const [, id] of oldest)
+                seenWorks.delete(id);
+            seenDbOp("readwrite", (store) => oldest.forEach(([, id]) => store.delete(id)));
+        }
+        refreshSeenThumbs();
+        refreshSettingsPanel();
+    })();
+    return seenLoading;
+}
+
+// Remember the work shown in the image view.  Runs after every DOM change.  Turning the pages of
+// a work doesn't count again.
+function recordSeenWork()
+{
+    const id = /^illust:(\d+)/.exec(window.ppixiv?.app?.displayedMediaId ?? "")?.[1] ?? null;
+    if(id == lastSeenId)
+        return;
+    lastSeenId = id;
+    if(id == null || seenMode() == "off")
+        return;
+    const isNew = !seenWorks.has(id);
+    seenWorks.add(id);
+    seenDbOp("readwrite", (store) => store.put(Date.now(), id));
+    if(isNew)
+    {
+        seenChannel?.postMessage({ id });
+        refreshSeenThumbs(id);
+    }
+}
+
+function clearSeenWorks()
+{
+    ++seenClears;
+    seenWorks.clear();
+    seenDbOp("readwrite", (store) => store.clear());
+    seenChannel?.postMessage({ clear: true });
+    refreshSeenThumbs();
+}
+
+if(seenChannel != null)
+{
+    seenChannel.onmessage = (e) => {
+        // Other code on the page can post to the channel too.  Only illust IDs go into the set,
+        // since refreshSeenThumbs puts them in a selector.
+        const id = e.data?.id;
+        if(e.data?.clear)
+        {
+            ++seenClears;
+            seenWorks.clear();
+        }
+        else if(typeof id == "string" && /^\d+$/.test(id))
+            seenWorks.add(id);
+        else
+            return;
+        if(active)
+        {
+            refreshSeenThumbs(e.data.clear ? null : id);
+            refreshSettingsPanel();
+        }
+    };
+}
+
+// Thumbnails in the manga view are pages of the work being viewed, so they're never dimmed.
+function markSeenThumb(box)
+{
+    const id = /^illust:(\d+)/.exec(box.dataset.id ?? "")?.[1];
+    const seen = id != null && seenMode() == "dim" && seenWorks.has(id) && !inMangaView();
+    if(box.classList.contains("pz-seen") != seen)
+        box.classList.toggle("pz-seen", seen);
+}
+
+// Update the thumbnails of one work, or of every work.
+function refreshSeenThumbs(id = null)
+{
+    const selector = id == null ? ".thumbnail-box[data-id]" : `.thumbnail-box[data-id^="illust:${id}-"]`;
+    for(const box of document.querySelectorAll(selector))
+        markSeenThumb(box);
+}
+
+// ------------------------------------------------------------------ download file names
+
+// ppixiv names downloads "<user> - <id> - <title>.<ext>", with " #<page>" after the ID when
+// downloading one page of a multi-page work.  It saves them by clicking a hidden <a download>
+// link to a blob: URL.  The browser reads the link's file name after the click event has been
+// dispatched, so the name can be changed here.  ZIP and MKV files keep ppixiv's names inside them.
+const FILENAME_KEY = "ppx-zh-filename"; // a template, or empty for ppixiv's names
+const FILENAME_FIELDS = [
+    ["author", "作者名"],
+    ["author_id", "作者 ID"],
+    ["id", "作品 ID"],
+    ["title", "标题"],
+    ["page", "页码，从 1 开始，ZIP 和动图为空"],
+    ["pages", "总页数"],
+    ["date", "投稿日期"],
+];
+const FILENAME_MAX_LENGTH = 180;
+
+// Return the fields for a file name ppixiv chose, or null if it isn't one.  getInfo(id) returns
+// ppixiv's media info for an illust ID.
+function downloadFields(name, getInfo)
+{
+    const ext = /\.([^.]+)$/.exec(name)?.[1];
+    if(ext == null)
+        return null;
+
+    // User names and titles can contain " - " and numbers too.  The ID is where the rest of the
+    // name is the work's title.  If more than one place fits, prefer the one where the name starts
+    // with the work's user name.  The lookahead lets a match start in the " - " the one before
+    // ended with, as in "Studio - 2024 - 123 - Title.png".
+    let found = null;
+    for(const match of name.matchAll(/ - (\d+)(?: #(\d+))?(?= - )/g))
+    {
+        const info = getInfo(match[1]);
+        if(info == null || name.slice(match.index + match[0].length + 3) != `${info.illustTitle}.${ext}`)
+            continue;
+        const author = name.slice(0, match.index);
+        if(found == null || author == info.userName)
+            found = { match, info, author };
+        if(author == info.userName)
+            break;
+    }
+    if(found == null)
+        return null;
+
+    const { match, info, author } = found;
+    const single = ext != "zip" && ext != "mkv";
+    const date = new Date(info.createDate);
+    const pad = (n) => String(n).padStart(2, "0");
+    return {
+        author,
+        author_id: String(info.userId ?? ""),
+        id: match[1],
+        title: info.illustTitle,
+        page: match[2] ?? (single ? "1" : ""),
+        pages: String(info.pageCount ?? ""),
+        date: isNaN(date) ? "" : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+        ext,
+    };
+}
+
+// Fill in a template like "{author} - {id}<_p{page}>".  Text in <> is left out when a field in it
+// is empty.  < and > can't be in Windows file names, so they're free for this.  Returns null when
+// nothing is left.
+function renderFilename(template, fields)
+{
+    // Fields are filled in one pass over the template, so a title containing "{id}" stays as it is.
+    const value = (key) => Object.hasOwn(fields, key) ? fields[key] : null;
+    const expand = (text) => text.replace(/\{(\w+)\}/g, (m, key) => value(key) ?? m);
+    let name = template.replace(/<([^<>]*)>|\{(\w+)\}/g, (m, inner, key) => {
+        if(inner == null)
+            return value(key) ?? m;
+        return [...inner.matchAll(/\{(\w+)\}/g)].some(([, key]) => value(key) === "") ? "" : expand(inner);
+    });
+
+    // Leading and trailing dots and spaces are dropped: Windows doesn't allow them at the end, and
+    // a leading dot hides the file elsewhere.  The end is trimmed with a loop, since a regex
+    // anchored to the end is slow on long runs of dots.
+    name = name.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, "_").replace(/\s+/g, " ");
+    name = Array.from(name).slice(0, FILENAME_MAX_LENGTH).join("").replace(/^[\s.]+/, "");
+    let end = name.length;
+    while(end > 0 && (name[end - 1] == "." || name[end - 1] == " "))
+        --end;
+    name = name.slice(0, end);
+    return name ? `${name}.${fields.ext}` : null;
+}
+
+document.addEventListener("click", (e) => {
+    const link = e.target;
+    if(!active || link?.tagName != "A" || !link.hasAttribute("download") || !link.href.startsWith("blob:"))
+        return;
+    const template = localStorage.getItem(FILENAME_KEY)?.trim();
+    const mediaCache = window.ppixiv?.mediaCache;
+    if(!template || mediaCache == null)
+        return;
+
+    const getInfo = (id) => {
+        try {
+            return mediaCache.getMediaInfoSync(`illust:${id}`);
+        } catch(e) {
+            return null;
+        }
+    };
+    const fields = downloadFields(link.download, getInfo);
+    const name = fields && renderFilename(template, fields);
+    if(name)
+        link.download = name;
+}, true);
+
+// ------------------------------------------------------------------ settings panel
+
+// The script's settings, in a panel opened from the button right of the appearance button.  It
+// isn't a ppixiv dialog, so it lives outside .widget and isn't translated.
+const SETTINGS_ICON = `
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+    <path d="M4 7h8.5M17.5 7H20M4 17h2.5M11.5 17H20"/>
+    <circle cx="15" cy="7" r="2.5"/>
+    <circle cx="9" cy="17" r="2.5"/>
+</svg>`;
+
+// Each setting with buttons: the values to show, and how to read the current one.
+const SETTINGS_CHOICES = {
+    [THEME_KEY]: { current: themeMode, options: [["dark", "深色"], ["light", "浅色"], ["auto", "跟随系统"]] },
+    [TAG_LANGUAGE_KEY]: { current: () => chineseTagsEnabled() ? "zh" : "en", options: [["zh", "中文"], ["en", "英文"]] },
+    [THUMB_QUALITY_KEY]: { current: () => localStorage.getItem(THUMB_QUALITY_KEY) == "off" ? "off" : "auto", options: [["auto", "自动"], ["off", "关闭"]] },
+    [HOVER_PREFETCH_KEY]: { current: () => hoverPrefetchEnabled() ? "on" : "off", options: [["on", "开启"], ["off", "关闭"]] },
+    [SEEN_KEY]: { current: seenMode, options: [["dim", "调暗"], ["keep", "只记录"], ["off", "不记录"]] },
+};
+
+const FILENAME_SAMPLE = {
+    author: "作者", author_id: "1234", id: "123456789", title: "作品标题", page: "2", pages: "3", date: "2026-01-02", ext: "png",
+};
+
+let settingsPanel = null;
+let settingsReturnFocus = null;
+
+// While the panel is open, focus that moves to the page behind it is brought back, so Tab and
+// Enter can't reach ppixiv's links and buttons.  Clicks are stopped by the backdrop.  ppixiv sets
+// inert on its own screens, so the panel leaves inert alone.
+document.addEventListener("focusin", (e) => {
+    if(settingsPanel?.isConnected && !settingsPanel.contains(e.target))
+        settingsPanel.querySelector(".pz-settings-box").focus();
+}, true);
+
+function setupSettingsButton()
+{
+    const themeButton = document.querySelector(".pz-theme-button");
+    if(themeButton == null || themeButton.parentElement.querySelector(".pz-settings-button"))
+        return;
+
+    const button = document.createElement("div");
+    button.className = "icon-button popup pz-settings-button";
+    button.dataset.popup = "中文脚本设置";
+    button.innerHTML = SETTINGS_ICON;
+    themeButton.after(button);
+    button.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openSettingsPanel();
+    });
+}
+
+function settingsPanelHtml()
+{
+    const choice = (key) => `<div class="pz-choice" data-key="${key}">` +
+        SETTINGS_CHOICES[key].options.map(([value, label]) => `<button type="button" data-value="${value}">${label}</button>`).join("") +
+        "</div>";
+    const row = (label, explanation, control) => `
+        <div class="pz-settings-row">
+            <div class="pz-settings-text">
+                <div class="pz-settings-label">${label}</div>
+                ${explanation ? `<div class="pz-settings-explanation">${explanation}</div>` : ""}
+            </div>
+            ${control}
+        </div>`;
+    const fields = FILENAME_FIELDS.map(([key, label]) => `<code>{${key}}</code> ${label}`).join("，");
+
+    return `
+        <div class="pz-settings-box" tabindex="-1">
+            <div class="pz-settings-header">
+                <span>中文脚本设置</span>
+                <button type="button" class="pz-settings-close" aria-label="关闭">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+                </button>
+            </div>
+            <div class="pz-settings-body">
+                <div class="pz-settings-section">外观和标签</div>
+                ${row("外观", "", choice(THEME_KEY))}
+                ${row("标签译名", "没有中文译名时显示英文。搜索框的补全会用中文译名找到日文标签。", choice(TAG_LANGUAGE_KEY))}
+
+                <div class="pz-settings-section">缩略图和预加载</div>
+                ${row("高清缩略图", "按屏幕上的实际像素和网速选择 WebP 尺寸。关闭后新加载的缩略图生效。", choice(THUMB_QUALITY_KEY))}
+                ${row("悬停预加载原图", "鼠标在缩略图上停留 0.3 秒后下载原图，会增加流量。多页作品的预加载跟随 ppixiv 的「预加载漫画」设置。", choice(HOVER_PREFETCH_KEY))}
+
+                <div class="pz-settings-section">看过的作品</div>
+                ${row("在看图界面打开过的作品", "推荐作品页可以用「隐藏看过的」去掉它们。「不记录」既不调暗，也不记下新打开的作品，已有的记录保留。", choice(SEEN_KEY))}
+                <div class="pz-settings-row pz-settings-actions">
+                    <span class="pz-seen-count"></span>
+                    <button type="button" class="pz-seen-clear">清除记录</button>
+                </div>
+
+                <div class="pz-settings-section">下载</div>
+                <div class="pz-settings-row pz-settings-wide">
+                    <div class="pz-settings-label">文件名</div>
+                    <input type="text" class="pz-filename-input" spellcheck="false" placeholder="留空使用 ppixiv 的文件名：作者名 - 作品 ID - 标题">
+                    <div class="pz-settings-explanation">可用 ${fields}。<code>&lt; &gt;</code> 里有空的变量时，整段省略。例如 <code>{id}&lt;_p{page}&gt; {title}</code></div>
+                    <div class="pz-filename-preview"></div>
+                </div>
+            </div>
+        </div>`;
+}
+
+function openSettingsPanel()
+{
+    if(settingsPanel?.isConnected)
+        return;
+
+    settingsReturnFocus = document.activeElement;
+    settingsPanel = document.createElement("div");
+    settingsPanel.className = "pz-settings";
+    settingsPanel.setAttribute("role", "dialog");
+    settingsPanel.setAttribute("aria-modal", "true");
+    settingsPanel.setAttribute("aria-label", "中文脚本设置");
+    settingsPanel.innerHTML = settingsPanelHtml();
+    document.body.append(settingsPanel);
+
+    const input = settingsPanel.querySelector(".pz-filename-input");
+    input.value = localStorage.getItem(FILENAME_KEY) ?? "";
+    input.addEventListener("input", () => {
+        if(input.value.trim())
+            localStorage.setItem(FILENAME_KEY, input.value);
+        else
+            localStorage.removeItem(FILENAME_KEY);
+        refreshSettingsPanel();
+    });
+
+    // Clicking outside the box closes the panel.  A drag that starts in the box, like selecting
+    // text in the template, and ends outside it also sends a click to the backdrop, so the press
+    // has to start there too.
+    let pressedBackdrop = false;
+    settingsPanel.addEventListener("pointerdown", (e) => pressedBackdrop = e.target == settingsPanel);
+    settingsPanel.addEventListener("click", (e) => {
+        if((e.target == settingsPanel && pressedBackdrop) || e.target.closest(".pz-settings-close"))
+        {
+            closeSettingsPanel();
+            return;
+        }
+        if(e.target.closest(".pz-seen-clear"))
+        {
+            clearSeenWorks();
+            refreshSettingsPanel();
+            return;
+        }
+
+        const button = e.target.closest(".pz-choice button[data-value]");
+        if(button == null)
+            return;
+        const key = button.parentElement.dataset.key;
+        if(button.dataset.value == SETTINGS_CHOICES[key].current())
+            return;
+        localStorage.setItem(key, button.dataset.value);
+        settingChanged();
+    });
+
+    refreshSettingsPanel();
+    settingsPanel.querySelector(".pz-settings-box").focus();
+}
+
+function closeSettingsPanel()
+{
+    if(settingsPanel == null)
+        return;
+    settingsPanel.remove();
+    settingsPanel = null;
+    settingsReturnFocus?.focus?.();
+    settingsReturnFocus = null;
+}
+
+function refreshSettingsPanel()
+{
+    if(!settingsPanel?.isConnected)
+        return;
+
+    for(const group of settingsPanel.querySelectorAll(".pz-choice[data-key]"))
+    {
+        const current = SETTINGS_CHOICES[group.dataset.key].current();
+        for(const button of group.querySelectorAll("button[data-value]"))
+        {
+            const selected = button.dataset.value == current;
+            button.classList.toggle("selected", selected);
+            button.setAttribute("aria-pressed", String(selected));
+        }
+    }
+
+    settingsPanel.querySelector(".pz-seen-count").textContent = `已记录 ${seenWorks.size} 个作品`;
+
+    // Another tab may have changed the template.  Leave the box alone while it's being typed in.
+    const input = settingsPanel.querySelector(".pz-filename-input");
+    const template = localStorage.getItem(FILENAME_KEY) ?? "";
+    if(document.activeElement != input && input.value != template)
+        input.value = template;
+
+    const preview = settingsPanel.querySelector(".pz-filename-preview");
+    if(!template.trim())
+    {
+        preview.textContent = `示例：${FILENAME_SAMPLE.author} - ${FILENAME_SAMPLE.id} #${FILENAME_SAMPLE.page} - ${FILENAME_SAMPLE.title}.${FILENAME_SAMPLE.ext}`;
+        return;
+    }
+    const page = renderFilename(template, FILENAME_SAMPLE) ?? "（ppixiv 的文件名）";
+    const zip = renderFilename(template, { ...FILENAME_SAMPLE, page: "", ext: "zip" }) ?? "（ppixiv 的文件名）";
+    preview.textContent = `示例：${page}，ZIP：${zip}`;
+}
+
+// ppixiv sends keys typed outside its screen to the screen, so its hotkeys would act on keys
+// typed into the panel.  This listener is added before ppixiv's own, so it runs first.  Keys
+// still do their usual job, like typing or moving the focus.  keyup goes through, so ppixiv sees
+// a key held when the panel opened being released.  Escape while an input method is composing
+// text belongs to the input method.
+for(const type of ["keydown", "keypress"])
+{
+    window.addEventListener(type, (e) => {
+        if(!settingsPanel?.isConnected)
+            return;
+        if(type == "keydown" && e.key == "Escape" && !e.isComposing && e.keyCode != 229)
+        {
+            e.preventDefault();
+            closeSettingsPanel();
+        }
+        else if(type == "keydown" && e.key == "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey)
+            wrapSettingsFocus(e);
+        e.stopImmediatePropagation();
+    }, true);
+}
+
+// Tab on the last control goes to the first, and Shift+Tab on the first control or on the box goes
+// to the last.  The browser would move the focus out of the panel, and the focusin listener would
+// put it on the box, so Shift+Tab could never get past it.
+function wrapSettingsFocus(e)
+{
+    const controls = [...settingsPanel.querySelectorAll("button, input")]
+        .filter((control) => !control.disabled && control.getClientRects().length > 0);
+    if(controls.length == 0)
+        return;
+    const focused = document.activeElement;
+    let target = null;
+    if(e.shiftKey && (focused == controls[0] || !controls.includes(focused)))
+        target = controls.at(-1);
+    else if(!e.shiftKey && focused == controls.at(-1))
+        target = controls[0];
+    if(target != null)
+    {
+        e.preventDefault();
+        target.focus();
+    }
+}
+
+// Like ppixiv's dialogs, the panel closes when ppixiv navigates, as with the back button.
+window.addEventListener("pp:popstate", () => closeSettingsPanel());
+window.addEventListener("popstate", () => closeSettingsPanel());
+
 // ------------------------------------------------------------------ activation (continued)
 
 // Features that look for their part of ppixiv's UI on activation and after every DOM change.
-const SETUPS = [ensureStyle, installFetchHook, setupChineseTags, setupThemeButton, setupBookmarkDownloadButton,
-    setupSimilarButton, setupDiscoveryTypeButtons];
+const SETUPS = [ensureStyle, installFetchHook, setupChineseTags, setupImageTranslationLanguage, setupThemeButton,
+    setupSettingsButton, setupBookmarkDownloadButton, setupSimilarButton, setupFeedFilterButtons];
 
 function activate()
 {
@@ -1513,6 +2491,7 @@ function activate()
     processTree(document.body);
     SETUPS.forEach(runSetup);
     runSetup(trackExistingThumbs);
+    loadSeenWorks();
     new MutationObserver(translateTitle).observe(document.head, { subtree: true, childList: true, characterData: true });
     translateTitle();
 }
@@ -1535,6 +2514,7 @@ const observer = new MutationObserver((mutations) => {
 
     SETUPS.forEach(runSetup);
     runSetup(prefetchUpcomingMangaPages);
+    runSetup(recordSeenWork);
     for(const mutation of mutations)
     {
         if(mutation.type == "childList")
