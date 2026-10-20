@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ppixiv 中文与现代界面
 // @namespace    https://github.com/Stevey233/ppixiv-zh
-// @version      0.9.0
+// @version      0.9.1
 // @description  给 ppixiv 汉化界面和标签译名，换成现代化的深色或浅色主题。需要同时安装 ppixiv。
 // @author       Stevey233
 // @license      MIT
@@ -1153,15 +1153,18 @@ function loadFeedPages(key)
     return new Map(Array.isArray(entries) ? entries.filter((entry) => Array.isArray(entry) && valid(entry)) : []);
 }
 
-// Add one page to the saved pages.  This reads them again rather than writing back a copy from
-// when the request started, since another data source may have saved pages in the meantime.
-function saveFeedPage(key, page, low, high, end)
+// Add one page to the source's pages.  Only the current source saves its map for a reload:
+// a response from before a refresh mustn't overwrite the new source's page ranges.  Keep the
+// old source's own map up to date too, since ppixiv can reuse it when navigating back.
+function saveFeedPage(key, page, low, high, end, pages = loadFeedPages(key), persist = true)
 {
-    const pages = loadFeedPages(key);
     const seq = Math.max(0, ...[...pages.values()].map((range) => range.seq)) + 1;
     pages.set(page, end ? { low, high, seq, end } : { low, high, seq });
+    if(!persist)
+        return;
 
     // Move the feed to the end, and drop the ones used longest ago.
+    // Read storage again so saving this feed doesn't discard changes to other feeds.
     const saved = readFeedPagesStorage();
     delete saved[key];
     saved[key] = [...pages];
@@ -1179,7 +1182,7 @@ function saveFeedPage(key, page, low, high, end)
 // feed's pages, and done(page, end) to call with the last page requested and whether it was
 // empty.  Returns null for feeds that aren't paged.  source is ppixiv's data source that made the
 // request.
-function feedPaging(feed, url, signature, source)
+function feedPaging(feed, url, signature, source, isCurrent = () => window.ppixiv?.app?.currentDataSource === source)
 {
     const param = FEEDS[feed].pageParam;
     if(param == null)
@@ -1210,7 +1213,15 @@ function feedPaging(feed, url, signature, source)
     // the page was reloaded further down.  A page above the ones ppixiv has, when it started from
     // the page in the URL, gets the page just before.  Anything else starts from the same page of
     // the feed.
-    const pages = loadFeedPages(feedKey);
+    // Session storage is only the starting point for a source.  Refreshed and cached sources
+    // may have different ranges for the same feed, so neither should read the other's updates.
+    const pin = source != null ? feedFilterFor(feed, source) : null;
+    let pages = pin?.pages.get(feedKey);
+    if(pages == null)
+    {
+        pages = loadFeedPages(feedKey);
+        pin?.pages.set(feedKey, pages);
+    }
     const before = pages.get(page - 1), known = pages.get(page), after = pages.get(page + 1);
     const ended = [...pages].filter(([endPage, range]) => range.end && endPage < page)
         .sort(([, a], [, b]) => b.seq - a.seq)[0]?.[1];
@@ -1235,7 +1246,7 @@ function feedPaging(feed, url, signature, source)
             return result.toString();
         },
         done(last, end = false) {
-            saveFeedPage(feedKey, page, Math.min(start, last), Math.max(start, last), end);
+            saveFeedPage(feedKey, page, Math.min(start, last), Math.max(start, last), end, pages, isCurrent());
         },
     };
 }
@@ -1246,17 +1257,16 @@ function feedPaging(feed, url, signature, source)
 // or another tab only applies to the views loaded after it.  The buttons show the filters of the
 // view on screen, and clicking one reloads it.  ppixiv makes a data source current before it
 // loads anything, so the current one is the one making the request.
-const feedFilterPins = new WeakMap(); // ppixiv data source -> { keep, signature, label, shown }
+const feedFilterPins = new WeakMap(); // ppixiv data source -> { keep, signature, label, shown, pages }
 
-function feedFilterFor(feed)
+function feedFilterFor(feed, source = window.ppixiv?.app?.currentDataSource)
 {
-    const source = window.ppixiv?.app?.currentDataSource;
     let filter = source != null ? feedFilterPins.get(source) : null;
     if(filter == null)
     {
         filter = {
             keep: feedFilter(feed), signature: feedFilterSignature(feed), label: feedFilterLabel(feed),
-            shown: savedFeedFilters(feed),
+            shown: savedFeedFilters(feed), pages: new Map(),
         };
         if(source != null)
             feedFilterPins.set(source, filter);
@@ -1284,16 +1294,11 @@ function shownFeedFilters(feed)
 // on later pages.
 const mergedPagesWithoutWorks = new WeakMap(); // ppixiv data source -> { pages: Map of page -> "end" or "skipped", ended: Map of side -> page }
 
-// filter is from feedFilterFor.
-async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
+// filter is from feedFilterFor.  ready, if provided, loads the seen list after the request's
+// source and location have been captured, not before.
+async function fetchFilteredFeed(fetchFunc, url, init, feed, filter, ready = null)
 {
     const source = window.ppixiv?.app?.currentDataSource;
-    const paging = feedPaging(feed, url, filter.signature, source);
-
-    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
-    // page left empty ends the feed, so only new works count.  These feeds' media IDs are always
-    // "illust:<id>-0" (ppixiv's util/media-id.js).
-    const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
 
     // ppixiv passes no abort signal, so notice when retrying stops helping: the user left the
     // page, or the feed was refreshed, which also happens when the filters change.  Opening a work
@@ -1306,7 +1311,25 @@ async function fetchFilteredFeed(fetchFunc, url, init, feed, filter)
         return url.pathname + "?" + search;
     };
     const startedAt = where();
-    const stale = () => where() != startedAt || window.ppixiv?.app?.currentDataSource !== source;
+    const stale = () => where() != startedAt || window.ppixiv?.app?.currentDataSource !== source ||
+        (source != null && feedFilterPins.get(source) !== filter);
+    const paging = feedPaging(feed, url, filter.signature, source, () => !stale());
+
+    if(ready != null)
+    {
+        await ready();
+        init?.signal?.throwIfAborted?.();
+        // The old source still needs a response, but it mustn't use the new source's IDs,
+        // retry requests, or put a "no works" message over the new view.
+        if(stale())
+            return await fetchFunc(url, init);
+    }
+
+    // Batches can repeat works from earlier pages.  ppixiv drops works it already has, and a
+    // page left empty ends the feed, so only new works count.  Read from the captured source
+    // after the wait, since it may have loaded another page in the meantime.  These feeds'
+    // media IDs are always "illust:<id>-0" (ppixiv's util/media-id.js).
+    const seen = new Set(source?.idList?.getAllMediaIds?.() ?? []);
 
     // A page loaded above the ones ppixiv has, when it started from a page in the URL, isn't
     // retried.  If it has nothing to keep, it's given to ppixiv unfiltered, since an empty page
@@ -1581,10 +1604,10 @@ function installFetchHook()
         if(filter?.keep == null)
             return await realFetch.call(this, url, init);
 
-        // Hiding seen works needs the list of them.
-        if(feed == "discovery")
-            await loadSeenWorks();
-        return await fetchFilteredFeed((u, i) => realFetch.call(this, u, i), url, init, feed, filter);
+        // Only hiding seen works needs the list.  Capture the request's source before waiting
+        // for it, since navigating or refreshing can replace the source during that wait.
+        const ready = feed == "discovery" && filter.shown.filters.hideSeen ? loadSeenWorks : null;
+        return await fetchFilteredFeed((u, i) => realFetch.call(this, u, i), url, init, feed, filter, ready);
     };
     hookedFetch.pzHooked = true;
     window.realFetch = hookedFetch;
@@ -1638,6 +1661,26 @@ function setupChineseTags()
     tagTranslations.pzChinese = true;
 
     const { addTranslations, getTranslations, getTranslation } = tagTranslations;
+    // Chinese lookups shouldn't reopen IndexedDB for every label.  Invalidate across tabs,
+    // and expire entries too, for browsers without BroadcastChannel or older script tabs.
+    const chineseCache = new Map();
+    const CACHE_LIMIT = 1000, CACHE_MS = 30000;
+    let cacheGeneration = 0;
+    const invalidateCache = () => {
+        ++cacheGeneration;
+        chineseCache.clear();
+    };
+    const cacheTranslation = (tag, value) => {
+        chineseCache.delete(tag);
+        chineseCache.set(tag, { value, expires: Date.now() + CACHE_MS });
+        while(chineseCache.size > CACHE_LIMIT)
+            chineseCache.delete(chineseCache.keys().next().value);
+    };
+    const channel = typeof window.BroadcastChannel == "function" ?
+        new window.BroadcastChannel("ppx-zh-tag-translations") : null;
+    if(channel != null)
+        channel.onmessage = invalidateCache;
+
     // Keep each read, merge and write together.  Search results and full work info can
     // arrive at once, so the next batch must wait for the previous write to finish.  With
     // pzOnlyMissingZh, which isn't passed on to ppixiv, tags that already have a Chinese
@@ -1646,31 +1689,85 @@ function setupChineseTags()
     tagTranslations.addTranslations = function(tagList, { pzOnlyMissingZh = false, ...options } = {})
     {
         const result = pendingTranslations.then(async () => {
-            let stored = null;
-            try {
-                stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
-            } catch(e) {
-            }
-
-            if(pzOnlyMissingZh)
-            {
-                const missing = tagList.map((tag, i) => [tag, stored?.[i]]).filter(([tag, info]) =>
-                    !info?.translation?.zh && !sessionTagTranslations.get(tag.tag)?.zh);
-                if(missing.length == 0)
-                    return;
-                tagList = missing.map(([tag]) => tag);
-                stored = missing.map(([, info]) => info);
-            }
-
-            const merged = tagList.map((tag, i) => {
-                const translation = { ...(stored?.[i]?.translation ?? sessionTagTranslations.get(tag.tag)) };
+            const merge = (tag, stored) => {
+                const session = sessionTagTranslations.get(tag.tag);
+                if(pzOnlyMissingZh && (stored?.translation?.zh || session?.zh))
+                    return null;
+                if(options.overwrite === false && stored != null)
+                    return stored;
+                const translation = { ...session, ...stored?.translation };
                 for(const [lang, value] of Object.entries(tag.translation ?? {}))
                     if(value)
                         translation[lang] = value;
-                sessionTagTranslations.set(tag.tag, translation);
-                return { ...tag, translation, romaji: tag.romaji ?? stored?.[i]?.romaji };
-            });
-            return await addTranslations.call(this, merged, options);
+                const romaji = tag.romaji ?? stored?.romaji;
+                if(Object.keys(translation).length == 0 && !romaji)
+                    return null;
+                return { tag: tag.tag, translation, ...(romaji ? { romaji } : {}) };
+            };
+
+            // KeyStorage.multiGet and addTranslations use separate transactions.  A Promise
+            // queue only serializes this tab, so another tab could overwrite our Chinese
+            // values with its old English-only snapshot.  Read, merge and put in one
+            // readwrite transaction; IndexedDB serializes it with other tabs' writers.
+            let merged = null;
+            if(typeof this._db.dbOp == "function" && typeof this._db.getStore == "function")
+            {
+                merged = await this._db.dbOp((db) => new Promise((resolve, reject) => {
+                    const store = this._db.getStore(db, "readwrite");
+                    const records = [];
+                    const transaction = store.transaction;
+                    transaction.oncomplete = () => resolve(records);
+                    transaction.onerror = transaction.onabort = () => reject(transaction.error);
+                    let index = 0;
+                    const next = () => {
+                        if(index == tagList.length)
+                            return;
+                        const tag = tagList[index++];
+                        const request = store.get(tag.tag);
+                        request.onsuccess = () => {
+                            const record = merge(tag, request.result);
+                            if(record != null)
+                            {
+                                store.put(record, tag.tag);
+                                records.push(record);
+                            }
+                            next();
+                        };
+                    };
+                    next();
+                }));
+            }
+
+            // IndexedDB can be unavailable in private windows.  Keep ppixiv's own fallback,
+            // and support older KeyStorage interfaces without bypassing their write method.
+            if(merged == null)
+            {
+                let stored = null;
+                try {
+                    stored = await this._db.multiGet(tagList.map((tag) => tag.tag));
+                } catch(e) {
+                }
+                merged = tagList.map((tag, i) => merge(tag, stored?.[i])).filter((tag) => tag != null);
+                for(const tag of merged)
+                    sessionTagTranslations.set(tag.tag, tag.translation);
+                await addTranslations.call(this, merged, options);
+            }
+            else
+            {
+                // The atomic path bypasses addTranslations, so maintain its English cache.
+                for(const tag of merged)
+                    if(tag.translation.en && (options.overwrite !== false || !this._cache?.has(tag.tag)))
+                        this._cache?.set(tag.tag, tag.translation.en);
+            }
+            if(merged.length == 0)
+                return;
+            invalidateCache();
+            for(const tag of merged)
+            {
+                sessionTagTranslations.set(tag.tag, tag.translation);
+                cacheTranslation(tag.tag, pickTagTranslation(tag.tag, tag.translation));
+            }
+            channel?.postMessage(null);
         });
         // Return the error to this caller without blocking later batches.
         pendingTranslations = result.catch(() => {});
@@ -1686,11 +1783,29 @@ function setupChineseTags()
             return {};
 
         await pendingTranslations;
-        const info = await this.getTagInfo(tags);
+        const cached = new Map();
+        const uncached = [...new Set(tags)].filter((tag) => {
+            const entry = chineseCache.get(tag);
+            if(entry == null || entry.expires <= Date.now())
+                return true;
+            cached.set(tag, entry.value);
+            return false;
+        });
+        const missing = new Set(uncached);
+        const generation = cacheGeneration;
+        const info = uncached.length > 0 ? await this.getTagInfo(uncached) : {};
         const result = {};
         for(const tag of tags)
         {
-            const value = pickTagTranslation(tag, info[tag]?.translation ?? sessionTagTranslations.get(tag));
+            let value;
+            if(missing.has(tag))
+            {
+                value = pickTagTranslation(tag, { ...sessionTagTranslations.get(tag), ...info[tag]?.translation });
+                if(generation == cacheGeneration)
+                    cacheTranslation(tag, value);
+            }
+            else
+                value = cached.get(tag);
             if(value != null)
                 result[tag] = value;
         }
@@ -1812,6 +1927,7 @@ function settingChanged()
     runSetup(refreshFeedFilterButtons);
     runSetup(refreshSeenThumbs);
     runSetup(refreshSettingsPanel);
+    runSetup(refreshPrefetchSettings);
 }
 
 // The button goes left of the gear: in the toolbar above the results on desktop, and in the
@@ -1867,7 +1983,10 @@ const prefetching = new Map(); // url -> img
 const hoverPrefetchTimes = [];
 let hoverTimer = null;
 let hoveredMediaId = null;
+let hoverPrefetchGeneration = 0;
 let lastMangaMediaId = null;
+let lastMangaMode = null;
+let mangaPrefetchGeneration = 0;
 
 const saveData = () => navigator.connection?.saveData == true;
 const hoverPrefetchEnabled = () => localStorage.getItem(HOVER_PREFETCH_KEY) != "off";
@@ -1890,7 +2009,7 @@ const cancelLater = (id) => (window.realClearTimeout ?? window.clearTimeout)(id)
 
 function prefetchUrl(url)
 {
-    if(!url || prefetched.has(url) || prefetching.has(url))
+    if(saveData() || !url || prefetched.has(url) || prefetching.has(url))
         return;
 
     // Drop the oldest unfinished prefetch to keep bandwidth for the newest.
@@ -1945,10 +2064,10 @@ async function getMediaInfoForPrefetch(mediaCache, mediaId)
 
 // If shownPage is given, it's the page on screen, and the other pages wait until it has
 // loaded so they don't share the connection with it.
-async function prefetchPages(mediaId, pages, shownPage = null)
+async function prefetchPages(mediaId, pages, shownPage, isCurrent)
 {
     const ppixiv = window.ppixiv;
-    if(parseMediaId(mediaId) == null || ppixiv?.mediaCache == null)
+    if(!isCurrent() || parseMediaId(mediaId) == null || ppixiv?.mediaCache == null)
         return;
 
     // Loading full info here also means the viewer won't wait for it when the work is opened.
@@ -1956,8 +2075,8 @@ async function prefetchPages(mediaId, pages, shownPage = null)
     if(info == null || info.illustType == 2)
         return;
 
-    // Another work or page may have been shown while the info loaded.
-    if(shownPage != null && mediaId != lastMangaMediaId)
+    // The hover, displayed page, or settings may have changed while the info loaded.
+    if(!isCurrent())
         return;
     if(ppixiv.muting?.anyTagMuted?.(info.tagList) || ppixiv.muting?.isUserIdMuted?.(info.userId))
         return;
@@ -1965,28 +2084,75 @@ async function prefetchPages(mediaId, pages, shownPage = null)
         return;
 
     for(const page of pages)
+    {
+        if(!isCurrent())
+            return;
         if(page < info.mangaPages.length)
             prefetchUrl(info.getMainImageUrl(page).url);
+    }
 }
 
 // An image outside the page that loads the page on screen.  It shares the viewer's request for
 // the same URL, so it costs nothing.  It's dropped when another page is shown, which ends the
 // wait.
 let shownPageLoader = null;
+let cancelShownPage = null;
+
+function cancelShownPageWait()
+{
+    const loader = shownPageLoader;
+    // Clearing src doesn't reliably dispatch an error.  Settle the promise ourselves, before
+    // clearing src, and remove handlers so late events can't affect a newer wait.
+    cancelShownPage?.();
+    if(loader != null)
+        loader.src = "";
+}
 
 // Resolve to true once url has loaded, or false if it failed or another page was shown first.
 function waitForShownPage(url)
 {
+    cancelShownPageWait();
     if(!url || prefetched.has(url))
         return Promise.resolve(true);
     const loader = document.createElement("img");
     shownPageLoader = loader;
     return new Promise((resolve) => {
-        loader.onload = () => resolve(shownPageLoader == loader);
-        loader.onerror = () => resolve(false);
+        const done = (ok) => {
+            if(shownPageLoader != loader)
+                return;
+            shownPageLoader = null;
+            cancelShownPage = null;
+            loader.onload = loader.onerror = null;
+            resolve(ok);
+        };
+        cancelShownPage = () => done(false);
+        loader.onload = () => done(true);
+        loader.onerror = () => done(false);
         loader.src = url;
     });
 }
+
+function cancelHoverPrefetch()
+{
+    ++hoverPrefetchGeneration;
+    hoveredMediaId = null;
+    if(hoverTimer != null)
+        cancelLater(hoverTimer);
+    hoverTimer = null;
+}
+
+function refreshPrefetchSettings()
+{
+    if(saveData() || !hoverPrefetchEnabled())
+        cancelHoverPrefetch();
+    prefetchUpcomingMangaPages();
+}
+
+// A connection setting can change without any DOM mutation to trigger the usual setup pass.
+navigator.connection?.addEventListener?.("change", () => {
+    if(active)
+        refreshPrefetchSettings();
+});
 
 // Return true if hovering a work would request anything: its full info isn't loaded yet, or
 // its original or 540 preview isn't downloaded or downloading.
@@ -2026,10 +2192,7 @@ document.addEventListener("pointerover", (e) => {
     if(mediaId == hoveredMediaId)
         return;
 
-    hoveredMediaId = null;
-    if(hoverTimer != null)
-        cancelLater(hoverTimer);
-    hoverTimer = null;
+    cancelHoverPrefetch();
 }, true);
 
 document.addEventListener("pointermove", (e) => {
@@ -2040,17 +2203,18 @@ document.addEventListener("pointermove", (e) => {
     if(mediaId == hoveredMediaId)
         return;
 
-    hoveredMediaId = mediaId;
-    if(hoverTimer != null)
-        cancelLater(hoverTimer);
-    hoverTimer = null;
+    cancelHoverPrefetch();
 
     const parsed = parseMediaId(mediaId);
-    if(parsed == null || !hoverPrefetchEnabled())
+    if(parsed == null || saveData() || !hoverPrefetchEnabled())
         return;
+    hoveredMediaId = mediaId;
+    const generation = hoverPrefetchGeneration;
+    const isCurrent = () => active && generation == hoverPrefetchGeneration &&
+        hoveredMediaId == mediaId && !saveData() && hoverPrefetchEnabled();
     hoverTimer = later(() => {
         hoverTimer = null;
-        if(hoveredMediaId != mediaId || saveData() || !hoverPrefetchEnabled())
+        if(!isCurrent())
             return;
 
         // Muted works show a placeholder.  Don't download what the user chose not to see.
@@ -2073,11 +2237,11 @@ document.addEventListener("pointermove", (e) => {
         if(partialInfo != null && partialInfo.illustType != 2)
         {
             window.ppixiv?.guessImageUrl?.guessUrl(mediaId).then((url) => {
-                if(url && hoveredMediaId == mediaId)
+                if(url && isCurrent())
                     prefetchUrl(url);
             }).catch(() => {});
         }
-        prefetchPages(mediaId, [parsed.page]).catch(() => {});
+        prefetchPages(mediaId, [parsed.page], null, isCurrent).catch(() => {});
 
         // The viewer shows ppixiv's 540 thumbnail while the original loads.  Search results
         // now load larger thumbnails instead (see "sharper thumbnails"), so fetch it too.
@@ -2088,16 +2252,25 @@ document.addEventListener("pointermove", (e) => {
 function prefetchUpcomingMangaPages()
 {
     const mediaId = window.ppixiv?.app?.displayedMediaId;
-    if(mediaId == lastMangaMediaId || saveData())
+    const mode = window.ppixiv?.settings?.get?.("preload_manga");
+    // Check disabling settings before deduplicating the media ID.  They can change while the
+    // same page is still displayed, and re-enabling should allow a fresh attempt on that page.
+    if(!active || saveData() || mode == "thumbnails")
+    {
+        lastMangaMediaId = null;
+        lastMangaMode = null;
+        ++mangaPrefetchGeneration;
+        cancelShownPageWait();
+        return;
+    }
+    if(mediaId == lastMangaMediaId && mode == lastMangaMode)
         return;
     lastMangaMediaId = mediaId;
+    lastMangaMode = mode;
+    const generation = ++mangaPrefetchGeneration;
 
     // Stop waiting for the page that was shown before.
-    if(shownPageLoader != null)
-    {
-        shownPageLoader.src = "";
-        shownPageLoader = null;
-    }
+    cancelShownPageWait();
 
     const parsed = parseMediaId(mediaId);
     if(parsed == null)
@@ -2105,13 +2278,13 @@ function prefetchUpcomingMangaPages()
 
     // Follow ppixiv's "Preload manga" setting.  "Thumbnails only" preloads no other pages, and
     // "Nearby pages" only preloads the next one.  ppixiv defaults to thumbnails only on mobile.
-    const mode = window.ppixiv?.settings?.get?.("preload_manga");
-    if(mode == "thumbnails")
-        return;
     const pages = [];
     for(let i = 1; i <= (mode == "partial" ? 1 : MANGA_PAGES_AHEAD); ++i)
         pages.push(parsed.page + i);
-    prefetchPages(mediaId, pages, parsed.page).catch(() => {});
+    const isCurrent = () => active && generation == mangaPrefetchGeneration && !saveData() &&
+        window.ppixiv?.app?.displayedMediaId == mediaId &&
+        window.ppixiv?.settings?.get?.("preload_manga") == mode;
+    return prefetchPages(mediaId, pages, parsed.page, isCurrent).catch(() => {});
 }
 
 // ------------------------------------------------------------------ sharper thumbnails
