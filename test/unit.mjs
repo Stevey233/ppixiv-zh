@@ -344,10 +344,11 @@ eq(wouldFetch(fullInfo('other'))('illust:1-0', 0), true, 'hover downloads a miss
 // The pages ahead wait for the page on screen, which is passed as shownPage.
 const mangaPages = (mode) => {
   const got = [];
-  new Function('window', 'prefetchPages', 'saveData', 'parseMediaId', 'MANGA_PAGES_AHEAD',
-    'let lastMangaMediaId = null, shownPageLoader = null;' + grab('prefetchUpcomingMangaPages') + '; prefetchUpcomingMangaPages();')(
+  new Function('window', 'prefetchPages', 'saveData', 'parseMediaId', 'MANGA_PAGES_AHEAD', 'cancelShownPageWait',
+    'let active = true, lastMangaMediaId = null, lastMangaMode = null, mangaPrefetchGeneration = 0;' +
+    grab('prefetchUpcomingMangaPages') + '; prefetchUpcomingMangaPages();')(
     { ppixiv: { app: { displayedMediaId: 'illust:1-3' }, settings: { get: () => mode } } },
-    async (id, pages, shownPage) => got.push(...pages, `after ${shownPage}`), () => false, () => ({ page: 3 }), 2);
+    async (id, pages, shownPage) => got.push(...pages, `after ${shownPage}`), () => false, () => ({ page: 3 }), 2, () => {});
   return got;
 };
 eq([mangaPages('full'), mangaPages('partial'), mangaPages('thumbnails'), mangaPages(undefined)],
@@ -359,8 +360,10 @@ for(const shownAgain of [false, true])
 {
   const fetched = [], loaders = [];
   const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
-    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
-    '; return { prefetchPages, showAnother() { shownPageLoader = null; } };')(
+    'let shownPageLoader = null, cancelShownPage = null, lastMangaMediaId = "illust:1-0";' +
+    grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('cancelShownPageWait') + grab('waitForShownPage') +
+    '; return { prefetchPages: (id, pages, shown) => prefetchPages(id, pages, shown, () => lastMangaMediaId == id),' +
+    'showAnother() { lastMangaMediaId = null; cancelShownPageWait(); } };')(
     { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: async () => ({ illustType: 0, mangaPages: [0, 1, 2, 3], getMainImageUrl: (p) => ({ url: `p${p}` }) }) } } },
     { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
     (url) => fetched.push(url), new Set(), () => ({ page: 0 }));
@@ -369,7 +372,7 @@ for(const shownAgain of [false, true])
   const waiting = [fetched.length, loaders.map((l) => l.src)];
   if(shownAgain)
     env.showAnother();
-  loaders[0].onload();
+  loaders[0].onload?.();
   await done;
   eq([waiting, fetched], [[0, ['p0']], shownAgain ? [] : ['p1', 'p2']],
     shownAgain ? 'read-ahead is dropped when another page is shown first' : 'read-ahead starts after the page on screen loads');
@@ -380,8 +383,10 @@ for(const shownAgain of [false, true])
   const fetched = [], loaders = [];
   let resolveInfo;
   const env = new Function('window', 'document', 'prefetchUrl', 'prefetched', 'parseMediaId',
-    'let shownPageLoader = null, lastMangaMediaId = "illust:1-0";' + grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('waitForShownPage') +
-    '; return { prefetchPages, show(id) { lastMangaMediaId = id; } };')(
+    'let shownPageLoader = null, cancelShownPage = null, lastMangaMediaId = "illust:1-0";' +
+    grab('getMediaInfoForPrefetch') + grab('prefetchPages') + grab('cancelShownPageWait') + grab('waitForShownPage') +
+    '; return { prefetchPages: (id, pages, shown) => prefetchPages(id, pages, shown, () => lastMangaMediaId == id),' +
+    'show(id) { lastMangaMediaId = id; } };')(
     { ppixiv: { mediaCache: { _nonexistantMediaIds: {}, getMediaInfo: () => new Promise((resolve) => resolveInfo = resolve) } } },
     { createElement: () => { const loader = {}; loaders.push(loader); return loader; } },
     (url) => fetched.push(url), new Set(), () => ({ page: 0 }));

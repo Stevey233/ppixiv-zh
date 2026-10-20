@@ -124,12 +124,17 @@ node build.mjs
 ```sh
 node test/unit.mjs
 node test/thumbnails.mjs
+node test/feed-races.mjs
+node test/prefetch-cancellation.mjs
+node test/tag-concurrency.mjs
 node test/tag-translations.mjs /path/to/ppixiv/web/vview/misc/tag-translations.js
 ```
 
 `unit.mjs` 检查界面文字和句式的翻译、作品筛选和跳过页后的接续、请求 URL、网速估算、标签译名选择和下载文件名。`thumbnails.mjs` 检查失败去重和重试确认、重建元素后的降级和已下载尺寸的复用、停用后是否仍发起升级或替换图片、失败退回后重新测量宽高比、缩放缩略图、漫画分页和节省流量模式的尺寸选择。
 
 `tag-translations.mjs` 使用 ppixiv 的实际 `TagTranslations` 类，检查并发更新是否保留中文、搜索补全的中文译名是否只补进缺少中文译名的标签、选择英文后是否使用 ppixiv 原来的查询、写入失败后能否继续保存，以及 IndexedDB 不可用时的会话缓存。省略源码路径时，默认读取 `~/scratch/ppixiv-src/repo/web/vview/misc/tag-translations.js`。
+
+`feed-races.mjs` 通过请求钩子检查刷新、离开页面、旧响应晚到和等待已看记录时的请求归属。`prefetch-cancellation.mjs` 检查设置切换、节省流量和作品变化能否阻止挂起任务继续发出原图请求。`tag-concurrency.mjs` 模拟两个独立标签页共享事务存储，检查译名原子合并、缓存失效与过期、失败事务回滚和无 IndexedDB 的回退。这些是离线确定性测试，不代替真实浏览器中的多标签页验证。
 
 排查漏翻译的文字时，可在脚本开头加入 `var PZ_DEBUG = true;`，然后在页面控制台执行 `document.dispatchEvent(new Event("pz-dump"))`。结果保存在 `document.documentElement.dataset.pzMissing`。
 
